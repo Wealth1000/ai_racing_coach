@@ -11,7 +11,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use ai_racing_coach::core::sample::Sample;
+use ai_racing_coach::features::FeatureParams;
 use ai_racing_coach::features::corner::{self, TrackCorner};
+use ai_racing_coach::features::corner_features;
 use ai_racing_coach::features::curvature;
 use ai_racing_coach::features::lap::{Lap, LapTracker};
 use ai_racing_coach::features::resample::{self, ResampledLap};
@@ -35,6 +37,10 @@ Examples:
 
   coach learn-track capture.ndjson.gz       write data/tracks/<track>.json
   coach learn-track capture.ndjson --dry-run   show the model, write nothing
+
+  coach analyse capture.ndjson.gz           how the fastest lap drove each
+                                            corner of the learned model
+  coach analyse capture.ndjson --all-laps   feature table for every clean lap
 
 Run `coach help <command>` for the full description of a command."
 )]
@@ -141,6 +147,31 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Describe how a capture's clean laps drove each corner of a track model.
+    ///
+    /// The model supplies *where* the corners are, learned once per track and
+    /// car; this command reports *what each lap did inside them* — turn-in
+    /// speed, apex speed and where it sat relative to the geometric apex,
+    /// braking point, trail braking, throttle pickup. Slicing at the model's
+    /// boundaries rather than per-lap detections is what makes two laps'
+    /// numbers comparable.
+    Analyse {
+        /// An `.ndjson` or `.ndjson.gz` capture from the logger.
+        capture: PathBuf,
+
+        /// Directory holding `<track>_<layout>.json` models.
+        #[arg(long, default_value = "data/tracks")]
+        model_dir: PathBuf,
+
+        /// Distance-grid spacing in metres.
+        #[arg(long, default_value_t = resample::DEFAULT_STEP_M, value_parser = positive_metres)]
+        step: f32,
+
+        /// Show feature tables for every clean lap, not just the fastest.
+        #[arg(long)]
+        all_laps: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -158,14 +189,13 @@ fn main() -> ExitCode {
             min_support,
             apex_tolerance,
             dry_run,
-        } => learn_track(
-            &capture,
-            &out,
+        } => learn_track(&capture, &out, step, min_support, apex_tolerance, dry_run),
+        Command::Analyse {
+            capture,
+            model_dir,
             step,
-            min_support,
-            apex_tolerance,
-            dry_run,
-        ),
+            all_laps,
+        } => analyse(&capture, &model_dir, step, all_laps),
     };
 
     match result {
@@ -283,12 +313,7 @@ fn learn_track(
         apex_tolerance_m: apex_tolerance,
         ..LearnParams::default()
     };
-    let model = TrackModel::learn(
-        session,
-        &laps,
-        &capture.display().to_string(),
-        &params,
-    )?;
+    let model = TrackModel::learn(session, &laps, &capture.display().to_string(), &params)?;
 
     println!();
     print_model(&model);
@@ -396,6 +421,154 @@ fn print_unanimity(corners: &[ModelCorner], laps: u32) {
     println!("\n  not unanimous: {}", names.join(", "));
 }
 
+/// `coach analyse` — per-corner driving numbers against a learned model.
+///
+/// The model supplies *where* the corners are; extraction reports *what each
+/// clean lap did inside them*. Only clean laps are analysed, for the same
+/// reason [`TrackModel::learn`] only lets clean laps vote: a spin's numbers
+/// are facts about the spin, not about how the corner is driven.
+fn analyse(
+    capture: &Path,
+    model_dir: &Path,
+    step: f32,
+    all_laps: bool,
+) -> ai_racing_coach::Result<()> {
+    let (source, laps) = read_laps(capture)?;
+    println!("{}", source.describe());
+
+    let session = source
+        .session()
+        .ok_or_else(|| ai_racing_coach::CoachError::EmptyCapture {
+            path: capture.display().to_string(),
+        })?;
+
+    let path = model_dir.join(TrackModel::file_name(&session.track));
+    if !path.exists() {
+        return Err(ai_racing_coach::CoachError::NotEnoughData {
+            action: "analyse driving against a track model",
+            detail: format!(
+                "no model for {} at {} — learn one first with `coach learn-track`",
+                session.track,
+                path.display()
+            ),
+        });
+    }
+    let model = TrackModel::load(&path)?;
+    model.check_track(&session.track, session.track_length)?;
+
+    // Boundaries are per-car (see the track_model module docs). Analysing a
+    // different car is allowed — every number stays self-consistent within
+    // this capture — but the boundaries themselves shift with speed, so it
+    // must not happen silently.
+    if model.provenance.car != session.car {
+        eprintln!(
+            "warning: the model was learned from laps of {}, but this capture is a {} — \
+             corner boundaries shift with speed, so treat them as approximate",
+            model.provenance.car, session.car
+        );
+    }
+
+    println!();
+    println!(
+        "Model {} — {} corners learned from {} lap(s) of {}",
+        model.track,
+        model.corners.len(),
+        model.lap_count(),
+        model.provenance.car,
+    );
+
+    let clean: Vec<&Lap> = laps.iter().filter(|l| l.quality.is_clean()).collect();
+    if clean.is_empty() {
+        println!("\nNo clean laps — nothing to analyse.");
+        return Ok(());
+    }
+
+    // Fastest clean lap by default, matching `inspect`.
+    let mut ordered = clean.clone();
+    ordered.sort_by(|a, b| a.lap_time_s().total_cmp(&b.lap_time_s()));
+    let chosen: &[&Lap] = if all_laps { &ordered } else { &ordered[..1] };
+
+    let params = FeatureParams::default();
+
+    for lap in chosen {
+        println!();
+        let Some(grid) = resample::resample_lap(&lap.samples, step) else {
+            println!(
+                "lap {}: not enough distinct positions to resample",
+                lap.id.0
+            );
+            continue;
+        };
+        let features = corner_features::extract_all(&model, &grid, &params, lap.id);
+        if features.is_empty() {
+            println!(
+                "lap {} ({:.2}s): no model corner is fully covered by this lap",
+                lap.id.0,
+                lap.lap_time_s()
+            );
+            continue;
+        }
+        println!(
+            "lap {} — {:.2}s, {} corners driven",
+            lap.id.0,
+            lap.lap_time_s(),
+            features.len()
+        );
+        print_feature_table(&features);
+    }
+
+    Ok(())
+}
+
+/// One row per corner: speeds in km/h, distances in metres relative to the
+/// corner they belong to, everything a rule will compare between laps.
+fn print_feature_table(features: &[ai_racing_coach::features::CornerFeatures]) {
+    let kmh = |mps: f32| format!("{:>5.0}", mps * 3.6);
+
+    println!(
+        "\n  {:>4}  {:>3}  {:>5}  {:>5}  {:>5}  {:>6}  {:>6}  {:>5}  {:>6}  {:>6}  {:>5}  {:>3}",
+        "turn",
+        "dir",
+        "in",
+        "apex",
+        "out",
+        "vmin@",
+        "brake@",
+        "trail",
+        "power@",
+        "time",
+        "slip",
+        "off"
+    );
+    for f in features {
+        let vmin_at = format!("{:+.0}m", f.speed_min_offset_m);
+        // Signed offset of the braking point from the corner boundary:
+        // negative is before the corner, positive is braking past it.
+        let brake_at = match f.braking_length_m {
+            Some(len) => format!("{:+.0}m", -len),
+            None => "   --".to_string(),
+        };
+        let power_at = match f.throttle_pickup_offset_m {
+            Some(off) => format!("{off:+.0}m"),
+            None => "   --".to_string(),
+        };
+        let slip_deg = f.peak_abs_slip_rad.to_degrees();
+
+        println!(
+            "  {:>4}  {:>3}  {}  {}  {}  {vmin_at:>6}  {brake_at:>6}  {:>5}  {power_at:>6}  \
+             {:>5.2}s  {slip_deg:>4.1}\u{00b0}  {:>3}",
+            f.corner_id.to_string(),
+            f.direction.short(),
+            kmh(f.entry_speed_mps),
+            kmh(f.apex_speed_mps),
+            kmh(f.exit_speed_mps),
+            if f.trail_braking { "yes" } else { "-" },
+            f.time_in_corner_s,
+            f.off_track_points,
+        );
+    }
+}
+
 fn print_source_stats(source: &NdjsonReplaySource) {
     println!(
         "Frames read     {}\nBlank lines     {}\nUnparseable     {}",
@@ -471,7 +644,12 @@ fn analyse_lap(lap: &Lap, step: f32) {
 
     let corners = corner::detect_corners(&grid);
     let (left, right) = corner::direction_counts(&corners);
-    println!("  {} corners, {} right / {} left", corners.len(), right, left);
+    println!(
+        "  {} corners, {} right / {} left",
+        corners.len(),
+        right,
+        left
+    );
 
     if corners.is_empty() {
         return;

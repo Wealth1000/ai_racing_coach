@@ -18,3 +18,7 @@
 # Analysis scratch output
 corners.txt
 curvature_profile.txt
+
+# A stray copy of the built binary once landed in the repo root (someone ran
+# cargo with an overridden target dir); keep it out rather than re-deleting it.
+/coach

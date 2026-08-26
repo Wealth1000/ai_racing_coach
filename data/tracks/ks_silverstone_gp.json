@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "sim": "AssettoCorsa",
+  "track": {
+    "track": "ks_silverstone",
+    "layout": "gp"
+  },
+  "track_length_m": 5803.9966,
+  "corners": [
+    {
+      "id": 0,
+      "start_m": 249.0,
+      "end_m": 339.0,
+      "apex_m": 296.0,
+      "heading_apex_m": 283.0,
+      "direction": "Right",
+      "turn_angle": 0.79252565,
+      "peak_curvature": 0.010342348,
+      "support": 4
+    },
+    {
+      "id": 1,
+      "start_m": 713.0,
+      "end_m": 844.0,
+      "apex_m": 769.0,
+      "heading_apex_m": 766.0,
+      "direction": "Right",
+      "turn_angle": 2.149537,
+      "peak_curvature": 0.028255844,
+      "support": 4
+    },
+    {
+      "id": 2,
+      "start_m": 875.0,
+      "end_m": 988.0,
+      "apex_m": 911.0,
+      "heading_apex_m": 912.0,
+      "direction": "Left",
+      "turn_angle": -2.5630074,
+      "peak_curvature": 0.042778067,
+      "support": 4
+    },
+    {
+      "id": 3,
+      "start_m": 1048.0,
+      "end_m": 1139.0,
+      "apex_m": 1075.0,
+      "heading_apex_m": 1073.0,
+      "direction": "Left",
+      "turn_angle": -0.6098435,
+      "peak_curvature": 0.008225049,
+      "support": 4
+    },
+    {
+      "id": 4,
+      "start_m": 1797.0,
+      "end_m": 1901.0,
+      "apex_m": 1872.0,
+      "heading_apex_m": 1864.0,
+      "direction": "Left",
+      "turn_angle": -1.7444762,
+      "peak_curvature": 0.021536533,
+      "support": 4
+    },
+    {
+      "id": 5,
+      "start_m": 1956.0,
+      "end_m": 2145.0,
+      "apex_m": 2014.0,
+      "heading_apex_m": 2015.0,
+      "direction": "Right",
+      "turn_angle": 3.3691611,
+      "peak_curvature": 0.023453036,
+      "support": 4
+    },
+    {
+      "id": 6,
+      "start_m": 2881.0,
+      "end_m": 2983.0,
+      "apex_m": 2946.0,
+      "heading_apex_m": 2938.0,
+      "direction": "Right",
+      "turn_angle": 0.9327935,
+      "peak_curvature": 0.010181835,
+      "support": 4
+    },
+    {
+      "id": 7,
+      "start_m": 3544.0,
+      "end_m": 3599.0,
+      "apex_m": 3558.0,
+      "heading_apex_m": 3558.0,
+      "direction": "Right",
+      "turn_angle": 0.4818542,
+      "peak_curvature": 0.010402459,
+      "support": 4
+    },
+    {
+      "id": 8,
+      "start_m": 3664.0,
+      "end_m": 3758.0,
+      "apex_m": 3718.0,
+      "heading_apex_m": 3716.0,
+      "direction": "Left",
+      "turn_angle": -0.8536887,
+      "peak_curvature": 0.010362654,
+      "support": 3
+    },
+    {
+      "id": 9,
+      "start_m": 3783.0,
+      "end_m": 3917.0,
+      "apex_m": 3818.0,
+      "heading_apex_m": 3817.0,
+      "direction": "Right",
+      "turn_angle": 1.427072,
+      "peak_curvature": 0.016189832,
+      "support": 4
+    },
+    {
+      "id": 10,
+      "start_m": 4769.0,
+      "end_m": 4972.0,
+      "apex_m": 4854.0,
+      "heading_apex_m": 4851.0,
+      "direction": "Right",
+      "turn_angle": 1.8778391,
+      "peak_curvature": 0.011588942,
+      "support": 4
+    },
+    {
+      "id": 11,
+      "start_m": 5295.0,
+      "end_m": 5573.0,
+      "apex_m": 5320.0,
+      "heading_apex_m": 5323.0,
+      "direction": "Right",
+      "turn_angle": 1.02213,
+      "peak_curvature": 0.035109337,
+      "support": 4
+    }
+  ],
+  "provenance": {
+    "car": "ks_ferrari_f138",
+    "capture": "telemetry_ac_ks_silverstone_ks_ferrari_f138_20260823_223951.ndjson.gz",
+    "reference_lap": 2,
+    "lap_ids": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "reference_spread_m": 1.1851889,
+    "reference_spread_max_m": 8.337916,
+    "reference_spread_max_at_m": 2125.0,
+    "step_m": 1.0
+  }
+}

@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "sim": "AssettoCorsa",
+  "track": {
+    "track": "ks_zandvoort",
+    "layout": ""
+  },
+  "track_length_m": 4189.691,
+  "corners": [
+    {
+      "id": 0,
+      "start_m": 366.0,
+      "end_m": 516.0,
+      "apex_m": 414.0,
+      "heading_apex_m": 427.0,
+      "direction": "Right",
+      "turn_angle": 3.1427922,
+      "peak_curvature": 0.025479687,
+      "support": 2
+    },
+    {
+      "id": 1,
+      "start_m": 729.0,
+      "end_m": 777.0,
+      "apex_m": 754.0,
+      "heading_apex_m": 758.0,
+      "direction": "Right",
+      "turn_angle": 0.9937048,
+      "peak_curvature": 0.02614173,
+      "support": 2
+    },
+    {
+      "id": 2,
+      "start_m": 858.0,
+      "end_m": 983.0,
+      "apex_m": 901.0,
+      "heading_apex_m": 901.0,
+      "direction": "Left",
+      "turn_angle": -3.075305,
+      "peak_curvature": 0.04203772,
+      "support": 2
+    },
+    {
+      "id": 3,
+      "start_m": 1698.0,
+      "end_m": 1841.0,
+      "apex_m": 1724.0,
+      "heading_apex_m": 1763.0,
+      "direction": "Right",
+      "turn_angle": 1.4275162,
+      "peak_curvature": 0.012421645,
+      "support": 2
+    },
+    {
+      "id": 4,
+      "start_m": 2055.0,
+      "end_m": 2113.0,
+      "apex_m": 2084.0,
+      "heading_apex_m": 2085.0,
+      "direction": "Right",
+      "turn_angle": 0.9392493,
+      "peak_curvature": 0.020431025,
+      "support": 2
+    },
+    {
+      "id": 5,
+      "start_m": 2257.0,
+      "end_m": 2375.0,
+      "apex_m": 2350.0,
+      "heading_apex_m": 2355.0,
+      "direction": "Right",
+      "turn_angle": 2.2210774,
+      "peak_curvature": 0.027431399,
+      "support": 2
+    },
+    {
+      "id": 6,
+      "start_m": 2489.0,
+      "end_m": 2643.0,
+      "apex_m": 2562.0,
+      "heading_apex_m": 2573.0,
+      "direction": "Left",
+      "turn_angle": -2.721404,
+      "peak_curvature": 0.023724422,
+      "support": 2
+    },
+    {
+      "id": 7,
+      "start_m": 3102.0,
+      "end_m": 3255.0,
+      "apex_m": 3185.0,
+      "heading_apex_m": 3183.0,
+      "direction": "Left",
+      "turn_angle": -1.2494946,
+      "peak_curvature": 0.03600362,
+      "support": 2
+    },
+    {
+      "id": 8,
+      "start_m": 3485.0,
+      "end_m": 3593.0,
+      "apex_m": 3501.0,
+      "heading_apex_m": 3560.0,
+      "direction": "Right",
+      "turn_angle": 1.5296662,
+      "peak_curvature": 0.01834855,
+      "support": 2
+    },
+    {
+      "id": 9,
+      "start_m": 3719.0,
+      "end_m": 3816.0,
+      "apex_m": 3775.0,
+      "heading_apex_m": 3788.0,
+      "direction": "Right",
+      "turn_angle": 0.96303654,
+      "peak_curvature": 0.011322213,
+      "support": 2
+    }
+  ],
+  "provenance": {
+    "car": "ks_ferrari_f138",
+    "capture": "telemetry_ac_ks_zandvoort_ks_ferrari_f138_20260823_231209.ndjson.gz",
+    "reference_lap": 2,
+    "lap_ids": [
+      2,
+      4
+    ],
+    "reference_spread_m": 1.2439773,
+    "reference_spread_max_m": 4.6953754,
+    "reference_spread_max_at_m": 488.0,
+    "step_m": 1.0
+  }
+}

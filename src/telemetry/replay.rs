@@ -52,12 +52,14 @@ impl NdjsonReplaySource {
             source,
         })?;
 
-        let reader: Box<dyn BufRead> =
-            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gz")) {
-                Box::new(BufReader::new(GzDecoder::new(file)))
-            } else {
-                Box::new(BufReader::new(file))
-            };
+        let reader: Box<dyn BufRead> = if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
+        {
+            Box::new(BufReader::new(GzDecoder::new(file)))
+        } else {
+            Box::new(BufReader::new(file))
+        };
 
         let sidecar = Sidecar::for_capture(&path);
         if let Some(sc) = &sidecar {

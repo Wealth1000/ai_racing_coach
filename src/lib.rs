@@ -8,6 +8,8 @@
 //!               ──▶ features::lap                 (lap boundaries + quality)
 //!               ──▶ features::resample            (fixed 1 m distance grid)
 //!               ──▶ features::curvature/corner    (corner geometry)
+//!               ──▶ features::track_model         (the canonical corner set)
+//!               ──▶ features::corner_features     (what a lap did in each)
 //! ```
 //!
 //! The resampling stage is not cosmetic. Assetto Corsa publishes car position

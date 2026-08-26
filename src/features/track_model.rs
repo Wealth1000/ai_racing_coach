@@ -84,8 +84,8 @@ use crate::core::error::CoachError;
 use crate::core::ids::{CornerId, LapId, TrackId};
 use crate::core::sample::{SessionInfo, Sim};
 use crate::features::corner::{self, CornerDirection, CornerParams, TrackCorner};
-use crate::features::line;
 use crate::features::lap::Lap;
+use crate::features::line;
 use crate::features::resample::{self, ResampledLap};
 
 /// On-disk format version. Bump on any incompatible change to the shape below;
@@ -331,12 +331,11 @@ impl TrackModel {
 
         // Medoid over the lines, which fixes the reference lap.
         let lines: Vec<&[_]> = grids.iter().map(|(_, g)| g.samples.as_slice()).collect();
-        let reference_idx = line::medoid_lap(&lines, params.step_m).ok_or_else(|| {
-            CoachError::NotEnoughData {
+        let reference_idx =
+            line::medoid_lap(&lines, params.step_m).ok_or_else(|| CoachError::NotEnoughData {
                 action: "learn a track model",
                 detail: "no lap line could be compared against the others".to_string(),
-            }
-        })?;
+            })?;
 
         let detections: Vec<Vec<TrackCorner>> = grids
             .iter()
@@ -588,7 +587,10 @@ impl TrackModel {
             // step guarantees it cannot happen, so an overlap in a file means
             // the file was edited into an inconsistent state.
             if c.start_m < prev_end {
-                return Err(format!("{at} starts at {} m, inside the previous corner which ends at {prev_end} m", c.start_m));
+                return Err(format!(
+                    "{at} starts at {} m, inside the previous corner which ends at {prev_end} m",
+                    c.start_m
+                ));
             }
             if c.support == 0 {
                 return Err(format!("{at} claims no supporting laps"));
@@ -685,11 +687,7 @@ fn nearest_candidate(
 /// Recomputed rather than threaded out of [`line::medoid_lap`]: the pairwise
 /// pass is `O(n)` per pair now, so running it twice is cheaper than the plumbing
 /// needed to avoid it.
-fn spread_of(
-    lines: &[&[crate::core::sample::Sample]],
-    idx: usize,
-    step_m: f32,
-) -> (f32, f32, f32) {
+fn spread_of(lines: &[&[crate::core::sample::Sample]], idx: usize, step_m: f32) -> (f32, f32, f32) {
     let mean = line::mean_separations(lines, step_m)
         .get(idx)
         .copied()
@@ -811,7 +809,13 @@ mod tests {
     fn a_corner_only_one_lap_saw_is_not_in_the_model() {
         // Three laps of the same circuit. Only the first has the kink, and it is
         // the shape of the MX5's 1-degree phantom at 1345 m.
-        let plain = &[(300.0, 0.0), right_90(), (300.0, 0.0), left_90(), (300.0, 0.0)];
+        let plain = &[
+            (300.0, 0.0),
+            right_90(),
+            (300.0, 0.0),
+            left_90(),
+            (300.0, 0.0),
+        ];
         let with_kink = &[
             (300.0, 0.0),
             right_90(),
@@ -842,7 +846,13 @@ mod tests {
 
     #[test]
     fn corners_every_lap_agrees_on_survive_with_full_support() {
-        let program = &[(300.0, 0.0), right_90(), (300.0, 0.0), left_90(), (300.0, 0.0)];
+        let program = &[
+            (300.0, 0.0),
+            right_90(),
+            (300.0, 0.0),
+            left_90(),
+            (300.0, 0.0),
+        ];
         let laps: Vec<Lap> = (0..3).map(|i| lap_from_curvature(i, program)).collect();
 
         let model = TrackModel::learn(&session(), &laps, "cap.ndjson", &LearnParams::default())
@@ -871,7 +881,13 @@ mod tests {
             left_90(),
             (300.0, 0.0),
         ];
-        let plain = &[(300.0, 0.0), right_90(), (300.0, 0.0), left_90(), (300.0, 0.0)];
+        let plain = &[
+            (300.0, 0.0),
+            right_90(),
+            (300.0, 0.0),
+            left_90(),
+            (300.0, 0.0),
+        ];
 
         // Two of three laps carry the kink so the *reference* is likely to have
         // it; the vote still needs 2 of 3, which the kink has here — so this
@@ -891,7 +907,10 @@ mod tests {
 
     #[test]
     fn one_lap_is_refused_rather_than_believed() {
-        let laps = vec![lap_from_curvature(0, &[(300.0, 0.0), right_90(), (300.0, 0.0)])];
+        let laps = vec![lap_from_curvature(
+            0,
+            &[(300.0, 0.0), right_90(), (300.0, 0.0)],
+        )];
         let err = TrackModel::learn(&session(), &laps, "cap.ndjson", &LearnParams::default())
             .expect_err("one lap cannot agree with anything");
         assert!(
@@ -1040,7 +1059,13 @@ mod tests {
 
     #[test]
     fn corner_lookup_finds_the_containing_corner_and_the_next_one() {
-        let program = &[(300.0, 0.0), right_90(), (300.0, 0.0), left_90(), (300.0, 0.0)];
+        let program = &[
+            (300.0, 0.0),
+            right_90(),
+            (300.0, 0.0),
+            left_90(),
+            (300.0, 0.0),
+        ];
         let laps: Vec<Lap> = (0..3).map(|i| lap_from_curvature(i, program)).collect();
         let model = TrackModel::learn(&session(), &laps, "cap.ndjson", &LearnParams::default())
             .expect("three clean laps");
@@ -1073,7 +1098,13 @@ mod tests {
 
     #[test]
     fn a_saved_model_reloads_identically() {
-        let program = &[(300.0, 0.0), right_90(), (300.0, 0.0), left_90(), (300.0, 0.0)];
+        let program = &[
+            (300.0, 0.0),
+            right_90(),
+            (300.0, 0.0),
+            left_90(),
+            (300.0, 0.0),
+        ];
         let laps: Vec<Lap> = (0..3).map(|i| lap_from_curvature(i, program)).collect();
         let model = TrackModel::learn(&session(), &laps, "cap.ndjson", &LearnParams::default())
             .expect("three clean laps");
@@ -1087,7 +1118,10 @@ mod tests {
 
         assert_eq!(back.track, model.track);
         assert_eq!(back.corners.len(), model.corners.len());
-        assert_eq!(back.provenance.reference_lap, model.provenance.reference_lap);
+        assert_eq!(
+            back.provenance.reference_lap,
+            model.provenance.reference_lap
+        );
         assert_eq!(back.provenance.car, model.provenance.car);
         for (a, b) in back.corners.iter().zip(&model.corners) {
             assert_eq!(a.id, b.id);
@@ -1118,7 +1152,13 @@ mod tests {
     /// validation rather than `save`'s output.
     /// A model learned from three identical laps of a right-then-left circuit.
     fn learned() -> TrackModel {
-        let program = &[(300.0, 0.0), right_90(), (300.0, 0.0), left_90(), (300.0, 0.0)];
+        let program = &[
+            (300.0, 0.0),
+            right_90(),
+            (300.0, 0.0),
+            left_90(),
+            (300.0, 0.0),
+        ];
         let laps: Vec<Lap> = (0..3).map(|i| lap_from_curvature(i, program)).collect();
         TrackModel::learn(&session(), &laps, "cap.ndjson", &LearnParams::default())
             .expect("three clean laps")

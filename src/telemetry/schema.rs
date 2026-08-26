@@ -66,12 +66,13 @@ pub fn validate_frame(frame: &AcFrame) -> Result<()> {
     }
 
     // ---- Driver inputs ----------------------------------------------------
-    for (field, v) in [
-        ("Physics_Gas", frame.gas),
-        ("Physics_Brake", frame.brake),
-    ] {
+    for (field, v) in [("Physics_Gas", frame.gas), ("Physics_Brake", frame.brake)] {
         if !v.is_finite() || v < 0.0 || v > 1.01 {
-            return Err(CoachError::implausible(field, v, "a pedal fraction in 0.0 ..= 1.01"));
+            return Err(CoachError::implausible(
+                field,
+                v,
+                "a pedal fraction in 0.0 ..= 1.01",
+            ));
         }
     }
     if !frame.steer_angle.is_finite() || frame.steer_angle.abs() > 2.0 {
@@ -101,7 +102,11 @@ pub fn validate_frame(frame: &AcFrame) -> Result<()> {
         ));
     }
     if !(0..=10).contains(&frame.gear) {
-        return Err(CoachError::implausible("Physics_Gear", frame.gear, "0 ..= 10"));
+        return Err(CoachError::implausible(
+            "Physics_Gear",
+            frame.gear,
+            "0 ..= 10",
+        ));
     }
     if !(0..=10_000).contains(&frame.completed_laps) {
         return Err(CoachError::implausible(

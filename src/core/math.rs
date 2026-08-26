@@ -52,10 +52,7 @@ pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
 /// Red Bull Ring, which runs clockwise); a lap containing a spin nets two
 /// (measured: +4.0016π on the MX5's 3rd lap).
 pub fn net_rotation(headings: &[f32]) -> f32 {
-    headings
-        .windows(2)
-        .map(|w| angle_delta(w[0], w[1]))
-        .sum()
+    headings.windows(2).map(|w| angle_delta(w[0], w[1])).sum()
 }
 
 #[cfg(test)]

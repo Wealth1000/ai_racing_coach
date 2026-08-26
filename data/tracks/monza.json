@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "sim": "AssettoCorsa",
+  "track": {
+    "track": "monza",
+    "layout": ""
+  },
+  "track_length_m": 5758.6606,
+  "corners": [
+    {
+      "id": 0,
+      "start_m": 903.0,
+      "end_m": 1020.0,
+      "apex_m": 969.0,
+      "heading_apex_m": 970.0,
+      "direction": "Left",
+      "turn_angle": -0.40056682,
+      "peak_curvature": 0.045183625,
+      "support": 4
+    },
+    {
+      "id": 1,
+      "start_m": 1286.0,
+      "end_m": 1324.0,
+      "apex_m": 1304.0,
+      "heading_apex_m": 1299.0,
+      "direction": "Right",
+      "turn_angle": 0.2004435,
+      "peak_curvature": 0.005836337,
+      "support": 2
+    },
+    {
+      "id": 2,
+      "start_m": 2111.0,
+      "end_m": 2226.0,
+      "apex_m": 2146.0,
+      "heading_apex_m": 2146.0,
+      "direction": "Left",
+      "turn_angle": -0.0717231,
+      "peak_curvature": 0.03124744,
+      "support": 4
+    },
+    {
+      "id": 3,
+      "start_m": 2471.0,
+      "end_m": 2644.0,
+      "apex_m": 2499.0,
+      "heading_apex_m": 2498.0,
+      "direction": "Right",
+      "turn_angle": 1.7762486,
+      "peak_curvature": 0.013944108,
+      "support": 4
+    },
+    {
+      "id": 4,
+      "start_m": 2824.0,
+      "end_m": 2932.0,
+      "apex_m": 2860.0,
+      "heading_apex_m": 2861.0,
+      "direction": "Right",
+      "turn_angle": 1.1835263,
+      "peak_curvature": 0.018533466,
+      "support": 4
+    },
+    {
+      "id": 5,
+      "start_m": 3899.0,
+      "end_m": 3961.0,
+      "apex_m": 3917.0,
+      "heading_apex_m": 3941.0,
+      "direction": "Left",
+      "turn_angle": -0.8083966,
+      "peak_curvature": 0.016738087,
+      "support": 4
+    },
+    {
+      "id": 6,
+      "start_m": 5082.0,
+      "end_m": 5465.0,
+      "apex_m": 5161.0,
+      "heading_apex_m": 5137.0,
+      "direction": "Right",
+      "turn_angle": 2.9080036,
+      "peak_curvature": 0.013694443,
+      "support": 4
+    }
+  ],
+  "provenance": {
+    "car": "ks_ferrari_f138",
+    "capture": "telemetry_ac_monza_ks_ferrari_f138_20260823_224926.ndjson.gz",
+    "reference_lap": 1,
+    "lap_ids": [
+      1,
+      2,
+      5,
+      8
+    ],
+    "reference_spread_m": 1.115872,
+    "reference_spread_max_m": 6.176606,
+    "reference_spread_max_at_m": 4197.0,
+    "step_m": 1.0
+  }
+}

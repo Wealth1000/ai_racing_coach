@@ -297,7 +297,11 @@ impl Span {
             direction: CornerDirection::from_signed(turn_angle),
             peak_curvature: self.peak_curvature,
             turn_angle,
-            min_speed: if min_speed.is_finite() { min_speed } else { 0.0 },
+            min_speed: if min_speed.is_finite() {
+                min_speed
+            } else {
+                0.0
+            },
         }
     }
 }

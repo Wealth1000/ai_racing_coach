@@ -163,8 +163,7 @@ fn interpolate(a: &Sample, b: &Sample, t: f32, distance: f32, step_m: f32) -> Sa
 
         rpm: lerp(a.rpm, b.rpm, t),
         surface_grip: lerp(a.surface_grip, b.surface_grip, t),
-        lap_time_ms: a.lap_time_ms
-            + ((b.lap_time_ms - a.lap_time_ms) as f32 * t) as i32,
+        lap_time_ms: a.lap_time_ms + ((b.lap_time_ms - a.lap_time_ms) as f32 * t) as i32,
     }
     .also_check(step_m)
 }
@@ -213,8 +212,12 @@ mod tests {
         // Two laps whose first samples are offset from each other must still
         // land on the same absolute distances, or index i means different
         // places in different laps and lap comparison is meaningless.
-        let a: Vec<Sample> = (0..20).map(|i| sample_at(0.4 + i as f32 * 2.0, 0.0)).collect();
-        let b: Vec<Sample> = (0..20).map(|i| sample_at(0.9 + i as f32 * 2.0, 0.0)).collect();
+        let a: Vec<Sample> = (0..20)
+            .map(|i| sample_at(0.4 + i as f32 * 2.0, 0.0))
+            .collect();
+        let b: Vec<Sample> = (0..20)
+            .map(|i| sample_at(0.9 + i as f32 * 2.0, 0.0))
+            .collect();
 
         let ra = resample_lap(&a, 1.0).expect("lap a");
         let rb = resample_lap(&b, 1.0).expect("lap b");
