@@ -10,8 +10,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use ai_racing_coach::core::sample::Sample;
+use ai_racing_coach::core::sample::{Sample, SessionInfo};
 use ai_racing_coach::features::FeatureParams;
+use ai_racing_coach::features::ReferenceStore;
 use ai_racing_coach::features::corner::{self, TrackCorner};
 use ai_racing_coach::features::corner_features;
 use ai_racing_coach::features::curvature;
@@ -41,6 +42,9 @@ Examples:
   coach analyse capture.ndjson.gz           how the fastest lap drove each
                                             corner of the learned model
   coach analyse capture.ndjson --all-laps   feature table for every clean lap
+
+  coach learn-pb capture.ndjson.gz          record your best pass per corner
+  coach learn-pb capture.ndjson --dry-run   show the bests, write nothing
 
 Run `coach help <command>` for the full description of a command."
 )]
@@ -172,6 +176,36 @@ enum Command {
         #[arg(long)]
         all_laps: bool,
     },
+
+    /// Record the driver's best pass through each corner as a personal best.
+    ///
+    /// Every clean lap's pass through every canonical corner is timed and
+    /// measured; the fastest pass through each span becomes that corner's
+    /// reference. Re-running against an existing personal best merges them
+    /// corner by corner — a stored pass survives unless this capture drove
+    /// that span strictly faster — so the file accumulates across sessions
+    /// instead of resetting with every one.
+    ///
+    /// It refuses to merge across cars, or across a re-learned track model:
+    /// corner ordinals are positions in a learned list, and a re-learn can
+    /// silently make "T3" mean somewhere else. Either way it starts fresh
+    /// from this capture and says so.
+    LearnPb {
+        /// An `.ndjson` or `.ndjson.gz` capture from the logger.
+        capture: PathBuf,
+
+        /// Directory holding `<track>_<layout>.json` models.
+        #[arg(long, default_value = "data/tracks")]
+        model_dir: PathBuf,
+
+        /// Distance-grid spacing in metres.
+        #[arg(long, default_value_t = resample::DEFAULT_STEP_M, value_parser = positive_metres)]
+        step: f32,
+
+        /// Print the result without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -196,6 +230,12 @@ fn main() -> ExitCode {
             step,
             all_laps,
         } => analyse(&capture, &model_dir, step, all_laps),
+        Command::LearnPb {
+            capture,
+            model_dir,
+            step,
+            dry_run,
+        } => learn_pb(&capture, &model_dir, step, dry_run),
     };
 
     match result {
@@ -421,31 +461,17 @@ fn print_unanimity(corners: &[ModelCorner], laps: u32) {
     println!("\n  not unanimous: {}", names.join(", "));
 }
 
-/// `coach analyse` — per-corner driving numbers against a learned model.
+/// Load the track model matching a session, or explain that one must be
+/// learned first. Shared by every command that needs canonical corners.
 ///
-/// The model supplies *where* the corners are; extraction reports *what each
-/// clean lap did inside them*. Only clean laps are analysed, for the same
-/// reason [`TrackModel::learn`] only lets clean laps vote: a spin's numbers
-/// are facts about the spin, not about how the corner is driven.
-fn analyse(
-    capture: &Path,
-    model_dir: &Path,
-    step: f32,
-    all_laps: bool,
-) -> ai_racing_coach::Result<()> {
-    let (source, laps) = read_laps(capture)?;
-    println!("{}", source.describe());
-
-    let session = source
-        .session()
-        .ok_or_else(|| ai_racing_coach::CoachError::EmptyCapture {
-            path: capture.display().to_string(),
-        })?;
-
+/// The car-mismatch warning lives here rather than in the callers: every
+/// consumer of a model needs it, and none of them should be able to forget
+/// that per-car boundaries make cross-car numbers approximate.
+fn load_model_for_session(session: &SessionInfo, model_dir: &Path) -> ai_racing_coach::Result<TrackModel> {
     let path = model_dir.join(TrackModel::file_name(&session.track));
     if !path.exists() {
         return Err(ai_racing_coach::CoachError::NotEnoughData {
-            action: "analyse driving against a track model",
+            action: "work from a track model",
             detail: format!(
                 "no model for {} at {} — learn one first with `coach learn-track`",
                 session.track,
@@ -467,6 +493,32 @@ fn analyse(
             model.provenance.car, session.car
         );
     }
+
+    Ok(model)
+}
+
+/// `coach analyse` — per-corner driving numbers against a learned model.
+///
+/// The model supplies *where* the corners are; extraction reports *what each
+/// clean lap did inside them*. Only clean laps are analysed, for the same
+/// reason [`TrackModel::learn`] only lets clean laps vote: a spin's numbers
+/// are facts about the spin, not about how the corner is driven.
+fn analyse(
+    capture: &Path,
+    model_dir: &Path,
+    step: f32,
+    all_laps: bool,
+) -> ai_racing_coach::Result<()> {
+    let (source, laps) = read_laps(capture)?;
+    println!("{}", source.describe());
+
+    let session = source
+        .session()
+        .ok_or_else(|| ai_racing_coach::CoachError::EmptyCapture {
+            path: capture.display().to_string(),
+        })?;
+
+    let model = load_model_for_session(session, model_dir)?;
 
     println!();
     println!(
@@ -565,6 +617,146 @@ fn print_feature_table(features: &[ai_racing_coach::features::CornerFeatures]) {
             if f.trail_braking { "yes" } else { "-" },
             f.time_in_corner_s,
             f.off_track_points,
+        );
+    }
+}
+
+/// `coach learn-pb` — record the best pass through each corner.
+///
+/// Clean laps only, for the same reason as everywhere else: a spin through
+/// T7 is a fact about the spin, and a personal best is not allowed to be one.
+fn learn_pb(capture: &Path, model_dir: &Path, step: f32, dry_run: bool) -> ai_racing_coach::Result<()> {
+    let (source, laps) = read_laps(capture)?;
+    println!("{}", source.describe());
+
+    let session = source
+        .session()
+        .ok_or_else(|| ai_racing_coach::CoachError::EmptyCapture {
+            path: capture.display().to_string(),
+        })?;
+
+    let model = load_model_for_session(session, model_dir)?;
+
+    let mut grids: Vec<(ai_racing_coach::core::ids::LapId, ResampledLap)> = Vec::new();
+    let mut unresampled = 0usize;
+    for lap in laps.iter().filter(|l| l.quality.is_clean()) {
+        match resample::resample_lap(&lap.samples, step) {
+            Some(grid) => grids.push((lap.id, grid)),
+            None => unresampled += 1,
+        }
+    }
+    if unresampled > 0 {
+        println!(
+            "\n{unresampled} clean lap(s) could not be put on the {step} m grid and were skipped"
+        );
+    }
+    if grids.is_empty() {
+        return Err(ai_racing_coach::CoachError::NotEnoughData {
+            action: "record personal bests",
+            detail: "no clean lap in the capture could be resampled".to_string(),
+        });
+    }
+
+    let incoming = ReferenceStore::harvest(
+        &model,
+        session.car.clone(),
+        &capture.display().to_string(),
+        step,
+        &FeatureParams::default(),
+        &grids,
+    )?;
+    if incoming.corners.is_empty() {
+        return Err(ai_racing_coach::CoachError::NotEnoughData {
+            action: "record personal bests",
+            detail: format!(
+                "none of the {} model corners was fully covered by any clean lap",
+                model.corners.len()
+            ),
+        });
+    }
+
+    let path = model_dir.join(ReferenceStore::file_name(&session.track));
+
+    println!();
+    let store = if path.exists() {
+        let existing = ReferenceStore::load(&path)?;
+        if existing.compatible_with(&session.car, model.fingerprint()) {
+            let mut merged = existing;
+            let report = merged.absorb(incoming);
+            println!("Merging into the existing personal best at {}:", path.display());
+            println!(
+                "  {} corner(s) improved, {} kept, {} added",
+                report.improved, report.kept, report.added
+            );
+            merged
+        } else {
+            println!("Existing personal best at {} cannot be merged:", path.display());
+            if existing.provenance.car != session.car {
+                println!(
+                    "  it was recorded in a {}, this capture is a {} — per-car numbers",
+                    existing.provenance.car, session.car
+                );
+            }
+            if existing.model_fingerprint != model.fingerprint() {
+                println!(
+                    "  the track model has been re-learned since; the stored corner \
+                     ordinals no longer mean the same places"
+                );
+            }
+            println!("  starting fresh from this capture");
+            incoming
+        }
+    } else {
+        incoming
+    };
+
+    print_pb_table(&store);
+
+    if dry_run {
+        println!("\n--dry-run: nothing written (would be {})", path.display());
+        return Ok(());
+    }
+
+    store.save(&path)?;
+    println!("\nWrote {}", path.display());
+    Ok(())
+}
+
+/// The personal best, one row per corner with the same conventions as
+/// `analyse`: speeds in km/h, distances signed relative to the boundary or
+/// apex they are measured from.
+fn print_pb_table(store: &ReferenceStore) {
+    println!(
+        "\nPersonal best — {}, {}, {} corner(s) recorded from {}",
+        store.track,
+        store.provenance.car,
+        store.corners.len(),
+        store.provenance.captures.join(", "),
+    );
+
+    println!(
+        "\n  {:>4}  {:>3}  {:>5}  {:>5}  {:>5}  {:>7}  {:>6}  {:>6}  {:>5}",
+        "turn", "dir", "in", "apex", "out", "time", "brake@", "power@", "trail"
+    );
+    for c in &store.corners {
+        let brake_at = match c.brake_offset_m {
+            Some(off) => format!("{off:+.0}m"),
+            None => "   --".to_string(),
+        };
+        let power_at = match c.throttle_pickup_offset_m {
+            Some(off) => format!("{off:+.0}m"),
+            None => "   --".to_string(),
+        };
+
+        println!(
+            "  {:>4}  {:>3}  {:>5.0}  {:>5.0}  {:>5.0}  {:>6.2}s  {brake_at:>6}  {power_at:>6}  {:>5}",
+            c.corner_id.to_string(),
+            c.direction.short(),
+            c.entry_speed_mps * 3.6,
+            c.apex_speed_mps * 3.6,
+            c.exit_speed_mps * 3.6,
+            c.time_in_corner_s,
+            if c.trail_braking { "yes" } else { "-" },
         );
     }
 }

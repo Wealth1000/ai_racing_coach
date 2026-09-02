@@ -455,6 +455,49 @@ impl TrackModel {
         (self.corners.len() - right, right)
     }
 
+    /// Stable fingerprint of the canonical corner set.
+    ///
+    /// A reference lap's corner *k* is "corner k" only because this list says
+    /// so: re-learning the model can insert, remove or merge detections and
+    /// silently shift every ordinal. Anything that stores data keyed by
+    /// [`CornerId`] — the personal best does — therefore pins itself to the
+    /// exact geometry with this hash and refuses to merge against a model
+    /// whose fingerprint differs.
+    ///
+    /// Hashes each corner's boundaries, apex and direction as raw bit patterns
+    /// rather than rounded metres: `serde_json` round-trips `f32` exactly
+    /// (shortest-representation output), so a saved-and-reloaded model
+    /// fingerprints identically while a genuinely different corner list
+    /// collides with probability ~0.
+    pub fn fingerprint(&self) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+        fn mix(mut h: u64, bytes: &[u8]) -> u64 {
+            for b in bytes {
+                h ^= u64::from(*b);
+                h = h.wrapping_mul(FNV_PRIME);
+            }
+            h
+        }
+
+        let mut hash = mix(FNV_OFFSET, &(self.corners.len() as u64).to_le_bytes());
+        for c in &self.corners {
+            for value in [
+                c.start_m.to_bits(),
+                c.end_m.to_bits(),
+                c.apex_m.to_bits(),
+                match c.direction {
+                    CornerDirection::Right => 1,
+                    CornerDirection::Left => 0,
+                },
+            ] {
+                hash = mix(hash, &value.to_le_bytes());
+            }
+        }
+        hash
+    }
+
     /// Conventional file name for a track's model: `<track>_<layout>.json`.
     pub fn file_name(track: &TrackId) -> String {
         if track.layout.is_empty() {
@@ -724,6 +767,16 @@ mod tests {
     use crate::core::math::wrap_pi;
     use crate::core::sample::Sample;
     use crate::features::lap::LapQuality;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// Unique-within-this-process id for tests that share a temp directory.
+    /// The directory key (`coach_track_model_validate`) is fixed, so without
+    /// this counter parallel tests race on the same file.
+    fn next_id() -> u32 {
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
 
     /// Build a lap from a curvature programme of `(length_m, signed_curvature)`
     /// segments, integrated into a path on a 1 m grid.
@@ -1148,6 +1201,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_fingerprint_survives_a_save_load_roundtrip() {
+        let model = learned();
+
+        let dir = std::env::temp_dir().join("coach_track_model_fingerprint");
+        let path = dir.join(TrackModel::file_name(&model.track));
+        let _ = fs::remove_dir_all(&dir);
+
+        model.save(&path).expect("save");
+        let back = TrackModel::load(&path).expect("load");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            model.fingerprint(),
+            back.fingerprint(),
+            "serde_json must round-trip f32 exactly or every stored reference goes stale"
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_changes_when_the_corner_set_changes() {
+        let model = learned();
+        let same = model.clone();
+        assert_eq!(model.fingerprint(), same.fingerprint());
+
+        // One boundary moved by a metre: a different corner set, and any
+        // reference keyed to the old ordinals is now describing somewhere
+        // else. The hash must notice.
+        let mut shifted = model.clone();
+        shifted.corners[0].end_m += 1.0;
+        assert_ne!(model.fingerprint(), shifted.fingerprint());
+
+        // A corner removed entirely: same.
+        let mut shorter = model.clone();
+        shorter.corners.remove(0);
+        for (i, c) in shorter.corners.iter_mut().enumerate() {
+            c.id = CornerId(i as u32);
+        }
+        assert_ne!(model.fingerprint(), shorter.fingerprint());
+    }
+
     /// Round-trip a model through JSON after mutating it, to check `load`'s
     /// validation rather than `save`'s output.
     /// A model learned from three identical laps of a right-then-left circuit.
@@ -1172,7 +1266,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join("coach_track_model_validate");
         fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join(format!("m{}.json", std::process::id()));
+        let path = dir.join(format!("m{}_{}.json", std::process::id(), next_id()));
         fs::write(&path, serde_json::to_string(&json).unwrap()).expect("write");
         let result = TrackModel::load(&path);
         let _ = fs::remove_file(&path);
