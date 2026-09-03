@@ -710,8 +710,8 @@ mod windows {
 
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows_sys::Win32::System::Memory::{
-        MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualQuery,
-        FILE_MAP_READ, MEMORY_BASIC_INFORMATION,
+        MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualQuery, FILE_MAP_READ,
+        MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS,
     };
 
     /// One open mapping: the section handle plus the mapped view.
@@ -720,7 +720,9 @@ mod windows {
     /// owned by exactly one thread (the source thread) for its whole life,
     /// which is what `Send` needs to mean for it to be sound.
     struct MappedView {
-        base: *mut core::ffi::c_void,
+        /// The mapped view itself, as `MapViewOfFile` returns it (windows-sys
+        /// wraps the pointer; `.Value` is the address).
+        view: MEMORY_MAPPED_VIEW_ADDRESS,
         handle: HANDLE,
     }
 
@@ -749,27 +751,27 @@ mod windows {
                 ));
             }
             // SAFETY: the handle is a valid section handle we own.
-            let base = unsafe { MapViewOfFile(handle, FILE_MAP_READ, 0, 0, 0) };
-            if base.is_null() {
+            let view = unsafe { MapViewOfFile(handle, FILE_MAP_READ, 0, 0, 0) };
+            if view.Value.is_null() {
                 let err = unsafe { GetLastError() };
                 unsafe { CloseHandle(handle) };
                 return Err(format!("cannot map {name} (error {err})"));
             }
 
-            // Size check: how many bytes are actually mapped at `base`.
+            // Size check: how many bytes are actually mapped at the view.
             let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
             // SAFETY: `info` is a valid, correctly-sized out pointer.
             let queried = unsafe {
-                VirtualQuery(base, &mut info, std::mem::size_of_val(&info))
+                VirtualQuery(view.Value, &mut info, std::mem::size_of_val(&info))
             };
             if queried == 0 {
                 let err = unsafe { GetLastError() };
-                unsafe { UnmapViewOfFile(base) };
+                unsafe { UnmapViewOfFile(view) };
                 unsafe { CloseHandle(handle) };
                 return Err(format!("cannot query {name} (error {err})"));
             }
             if info.RegionSize < expect_bytes {
-                unsafe { UnmapViewOfFile(base) };
+                unsafe { UnmapViewOfFile(view) };
                 unsafe { CloseHandle(handle) };
                 return Err(format!(
                     "{name} is {} bytes, expected {expect_bytes} — the page \
@@ -777,7 +779,7 @@ mod windows {
                     info.RegionSize
                 ));
             }
-            Ok(Self { base, handle })
+            Ok(Self { view, handle })
         }
 
         /// A copy of the page as it stands right now.
@@ -792,7 +794,7 @@ mod windows {
             // SAFETY: the view is at least `size_of::<T>()` bytes — checked
             // at open — and aligned to the page size, which exceeds any
             // alignment `T` needs.
-            unsafe { std::ptr::read(self.base as *const T) }
+            unsafe { std::ptr::read(self.view.Value as *const T) }
         }
     }
 
@@ -801,7 +803,7 @@ mod windows {
             // SAFETY: both handles are the ones `open` acquired and are
             // still valid — nothing else closes them.
             unsafe {
-                UnmapViewOfFile(self.base);
+                UnmapViewOfFile(self.view);
                 CloseHandle(self.handle);
             }
         }
