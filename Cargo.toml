@@ -1,7 +1,8 @@
 [package]
 name = "ai_racing_coach"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+license = "MIT"
 
 # Both a library and a binary. The library target is what integration tests in
 # tests/ link against — without it, no test can reach any of this code.
