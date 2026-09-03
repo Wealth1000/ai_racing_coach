@@ -1,28 +1,29 @@
-//! The GUI's top-level app: pick a sim, wait for its telemetry, coach.
+//! The GUI's top-level app: pick a sim, then its home screen, then coach.
 //!
 //! `CoachGui` is the eframe app the window actually runs; the session window
 //! of Batch 15 ([`CoachApp`]) is now the last of its phases rather than the
-//! whole program, because a live session no longer starts when the program
-//! does — it starts when the driver picks a sim *and* drives out of the
-//! garage. The phases:
+//! whole program. The phases:
 //!
 //! 1. **Picking** — one button per registered provider. No telemetry exists
 //!    yet, so there is nothing else to show.
-//! 2. **Waiting** — a background thread attaches to the chosen sim and holds
+//! 2. **Home** — the chosen sim's sheet of actions (see [`crate::ui::screens`]):
+//!    the whole CLI surface, plus the record-while-coaching setting. Coach
+//!    Live is one action among them now, not the only thing a sim is for.
+//! 3. **Waiting** — a background thread attaches to the chosen sim and holds
 //!    its first `next_sample` until the car is on track. The window says so,
-//!    plainly, and can be sent back to the picker.
-//! 3. **Live** — the attach thread resolved the session, loaded the model
+//!    plainly, and can be sent back to the home screen.
+//! 4. **Live** — the attach thread resolved the session, loaded the model
 //!    and spawned the pipeline; the [`CoachApp`] takes over the window and
 //!    the voice announces the pickup.
-//! 4. **Failed** — the attach or the setup failed; the reason, and a way
-//!    back to the picker.
+//! 5. **Failed** — the attach or the setup failed; the reason, and a way
+//!    back to the home screen.
 //!
-//! The UI thread never blocks on the sim: the attach thread owns every
-//! blocking call (attach retry, first sample, model load), and the window
-//! only ever polls a channel. A window that freezes while waiting for a game
-//! to launch looks exactly like a crash.
+//! The UI thread never blocks on the sim: the attach thread and the job
+//! threads own every blocking call, and the window only ever polls a
+//! channel. A window that freezes while waiting for a game to launch looks
+//! exactly like a crash.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -32,12 +33,20 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use eframe::egui;
 
 use crate::audio::{FeedbackSink, TtsSink};
+use crate::commands as commands_lib;
 use crate::core::config::{CoachConfig, InputDevice};
+use crate::core::settings::{CAPTURES_DIR, Settings};
+use crate::core::CoachError;
 use crate::runtime;
 use crate::runtime::threads::LiveWiring;
 use crate::sims::{self, SimProvider};
 use crate::telemetry::PrefixedSource;
 use crate::ui::app::CoachApp;
+use crate::ui::job::JobScreen;
+use crate::ui::screens::{
+    CaptureAction, CaptureOut, CaptureScreen, ExportOut, ExportScreen, HomeAction, LearnOut,
+    LearnScreen, RecordOut, RecordScreen, SimHome,
+};
 
 /// Same 10 Hz as the session feed: the waiting screen polls its channel on
 /// this clock, so one constant drives the whole window.
@@ -60,6 +69,18 @@ pub enum AttachResult {
 pub enum GuiPhase {
     /// Choose which sim to coach.
     Picking,
+    /// The chosen sim's action sheet (see [`crate::ui::screens`]).
+    Home(SimHome),
+    /// Inspect / Analyse / Learn PB — one capture to pick.
+    Capture(CaptureScreen),
+    /// Coach Learn — every capture to tick.
+    Learn(LearnScreen),
+    /// Record — a lap count to choose.
+    Record(RecordScreen),
+    /// Export dataset — the directories to name.
+    Export(ExportScreen),
+    /// A command running on a background thread, with its output.
+    Job(JobScreen),
     /// The background thread is attaching to the chosen sim. `stop` is the
     /// flag that interrupts its blocking reads when the driver goes back.
     Waiting {
@@ -73,8 +94,8 @@ pub enum GuiPhase {
     Failed { sim_name: String, error: String },
 }
 
-/// The top-level GUI: the sim picker, the waiting screen, and the live
-/// session behind one window.
+/// The top-level GUI: the sim picker, each sim's home screen, the waiting
+/// screen, and the live session behind one window.
 pub struct CoachGui {
     phase: GuiPhase,
     /// Where models live — the attach thread needs it to load the session's
@@ -82,6 +103,9 @@ pub struct CoachGui {
     model_dir: PathBuf,
     /// Distance-grid spacing, same role as `--step` on the CLI.
     step: f32,
+    /// The persisted settings, shared by every phase: the home screen's
+    /// toggle edits them and Coach Live obeys them.
+    settings: Settings,
 }
 
 impl CoachGui {
@@ -93,6 +117,7 @@ impl CoachGui {
             phase: GuiPhase::Picking,
             model_dir,
             step,
+            settings: Settings::load(),
         }
     }
 
@@ -103,6 +128,7 @@ impl CoachGui {
             phase: GuiPhase::Live(Box::new(app)),
             model_dir: PathBuf::new(),
             step: 0.0,
+            settings: Settings::load(),
         }
     }
 
@@ -111,23 +137,36 @@ impl CoachGui {
     /// Returns false when no provider carries that key: the picker is a
     /// better answer than a "failed" screen for a typo.
     pub fn wait_for(&mut self, key: &str) -> bool {
-        let Some(provider) = sims::registry().iter().map(|p| &**p).find(|p| p.key() == key)
-        else {
+        let Some(provider) = provider_by_key(key) else {
             return false;
         };
-        self.begin_attach(provider);
+        // The setting applies wherever Coach Live is entered from, command
+        // line included — the file is the setting, not the window's memory
+        // of it.
+        let record = self.settings.record_while_coaching;
+        self.begin_attach(provider, record);
         true
     }
 
-    /// Kick off the attach thread and move to the waiting screen.
-    fn begin_attach(&mut self, provider: &'static dyn SimProvider) {
+    /// A provider by registry key — the way back from a home screen to the
+    /// provider that opened it.
+    fn provider_of(home: &SimHome) -> Option<&'static dyn SimProvider> {
+        provider_by_key(&home.sim_key)
+    }
+
+    /// Kick off the attach thread and move to the waiting screen. `record`
+    /// is the record-while-coaching setting: the session capture is written
+    /// alongside the coaching when the provider can.
+    fn begin_attach(&mut self, provider: &'static dyn SimProvider, record: bool) {
         let (tx, rx) = unbounded();
         let stop = Arc::new(AtomicBool::new(false));
         let sim_name = provider.name().to_string();
         let model_dir = self.model_dir.clone();
         let step = self.step;
         let stop_for_thread = Arc::clone(&stop);
-        thread::spawn(move || attach(provider, model_dir, step, stop_for_thread, tx));
+        thread::spawn(move || {
+            attach(provider, model_dir, step, record, stop_for_thread, tx)
+        });
         self.phase = GuiPhase::Waiting {
             sim_name,
             result: rx,
@@ -135,10 +174,135 @@ impl CoachGui {
         };
     }
 
+    /// Act on what a home screen asked for. Every action the sheet offers
+    /// lands here, so the transitions are plain data logic — testable
+    /// without a window, like the attach transitions beside them.
+    fn run_home_action(&mut self, home: SimHome, action: HomeAction) {
+        match action {
+            HomeAction::None => {}
+            HomeAction::Back => self.phase = GuiPhase::Picking,
+            HomeAction::CoachLive => {
+                if let Some(provider) = Self::provider_of(&home) {
+                    let record = self.settings.record_while_coaching;
+                    self.begin_attach(provider, record);
+                }
+            }
+            HomeAction::Record => {
+                self.phase = GuiPhase::Record(RecordScreen::new(home));
+            }
+            HomeAction::Inspect => {
+                self.phase =
+                    GuiPhase::Capture(CaptureScreen::new(home, CaptureAction::Inspect));
+            }
+            HomeAction::Analyse => {
+                self.phase =
+                    GuiPhase::Capture(CaptureScreen::new(home, CaptureAction::Analyse));
+            }
+            HomeAction::LearnPb => {
+                self.phase =
+                    GuiPhase::Capture(CaptureScreen::new(home, CaptureAction::LearnPb));
+            }
+            HomeAction::Learn => {
+                self.phase = GuiPhase::Learn(LearnScreen::new(home));
+            }
+            HomeAction::Export => {
+                self.phase = GuiPhase::Export(ExportScreen::new(home));
+            }
+        }
+    }
+
+    /// Run one capture command as a job. The model dir and step are the
+    /// window's, the same defaults the CLI takes.
+    fn run_capture_job(&mut self, home: SimHome, action: CaptureAction, capture: PathBuf) {
+        let model_dir = self.model_dir.clone();
+        let step = self.step;
+        let (title, job): (&str, JobFn) = match action {
+                CaptureAction::Inspect => (
+                    "Inspect",
+                    Box::new(move |p| {
+                        commands_lib::inspect(&capture, None, step, false, p)
+                    }),
+                ),
+                CaptureAction::Analyse => (
+                    "Analyse",
+                    Box::new(move |p| {
+                        commands_lib::analyse(&capture, None, &model_dir, step, false, p)
+                    }),
+                ),
+                CaptureAction::LearnPb => (
+                    "Learn personal best",
+                    Box::new(move |p| {
+                        commands_lib::learn_pb(&capture, None, &model_dir, step, false, p)
+                    }),
+                ),
+            };
+        self.phase = GuiPhase::Job(JobScreen::spawn(
+            title.to_string(),
+            home,
+            None,
+            job,
+        ));
+    }
+
+    /// Run Coach Learn as a job over the ticked captures.
+    fn run_learn_job(&mut self, home: SimHome, captures: Vec<PathBuf>) {
+        let model_dir = self.model_dir.clone();
+        let step = self.step;
+        self.phase = GuiPhase::Job(JobScreen::spawn(
+            "Coach Learn".to_string(),
+            home,
+            None,
+            move |p| commands_lib::learn_track(&captures, None, &model_dir, step, false, p),
+        ));
+    }
+
+    /// Run a recording as a job, with the Stop button wired to its stop flag.
+    fn run_record_job(&mut self, home: SimHome, laps: Option<u32>) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let sim = home.sim_key.clone();
+        let stop_for_job = Arc::clone(&stop);
+        self.phase = GuiPhase::Job(JobScreen::spawn(
+            "Record".to_string(),
+            home,
+            Some(stop),
+            move |p| {
+                commands_lib::record(None, laps, false, Some(&sim), Some(stop_for_job), p)
+            },
+        ));
+    }
+
+    /// Run the dataset export as a job.
+    fn run_export_job(&mut self, home: SimHome, sessions_dir: PathBuf, out: PathBuf) {
+        let model_dir = self.model_dir.clone();
+        self.phase = GuiPhase::Job(JobScreen::spawn(
+            "Export dataset".to_string(),
+            home,
+            None,
+            move |p| commands_lib::export_dataset(&sessions_dir, &out, &model_dir, p),
+        ));
+    }
+
+    /// The phase's name — for assertions and failure messages, where a name
+    /// reads and a debug dump does not.
+    #[cfg(test)]
+    fn phase_name(&self) -> &'static str {
+        match &self.phase {
+            GuiPhase::Picking => "Picking",
+            GuiPhase::Home(_) => "Home",
+            GuiPhase::Capture(_) => "Capture",
+            GuiPhase::Learn(_) => "Learn",
+            GuiPhase::Record(_) => "Record",
+            GuiPhase::Export(_) => "Export",
+            GuiPhase::Job(_) => "Job",
+            GuiPhase::Waiting { .. } => "Waiting",
+            GuiPhase::Live(_) => "Live",
+            GuiPhase::Failed { .. } => "Failed",
+        }
+    }
+
     /// Poll the attach channel; transition on what arrived. Factored out of
     /// the repaint handler so the transitions are testable without a window.
-    fn poll_attach(&mut self) {
-        let (sim_name, result) = match &self.phase {
+    fn poll_attach(&mut self) {        let (sim_name, result) = match &self.phase {
             GuiPhase::Waiting { sim_name, result, .. } => (sim_name.clone(), result),
             _ => return,
         };
@@ -179,10 +343,17 @@ impl CoachGui {
 /// model and personal best → pipeline → wiring. Every step's failure is a
 /// message for the Failed screen, not a panic: a driver who forgot to learn
 /// the track model should read that, not see the window vanish.
+///
+/// `record` is the record-while-coaching setting: the same session capture
+/// the logger would write, produced by the same shared-memory reads the
+/// coaching is already doing. A provider that cannot record while coaching
+/// says so and loses only the byproduct, never the session — the same
+/// fallback `coach live` makes on the command line.
 fn attach(
     provider: &'static dyn SimProvider,
     model_dir: PathBuf,
     step: f32,
+    record: bool,
     stop: Arc<AtomicBool>,
     tx: Sender<AttachResult>,
 ) {
@@ -194,9 +365,27 @@ fn attach(
     let voice_skipped = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let sink: Box<dyn FeedbackSink> = Box::new(TtsSink::connect(voice_skipped));
 
-    let mut source = match provider.live() {
-        Ok(source) => source,
-        Err(e) => return report(AttachResult::Failed(e.to_string())),
+    let live = || provider.live();
+    let mut source = if record {
+        match provider.live_with_recording(Path::new(CAPTURES_DIR)) {
+            Ok(source) => source,
+            Err(CoachError::LiveRecordUnsupported { sim }) => {
+                eprintln!(
+                    "warning: {sim} cannot record while coaching in this build — \
+                     coaching without a session capture"
+                );
+                match live() {
+                    Ok(source) => source,
+                    Err(e) => return report(AttachResult::Failed(e.to_string())),
+                }
+            }
+            Err(e) => return report(AttachResult::Failed(e.to_string())),
+        }
+    } else {
+        match live() {
+            Ok(source) => source,
+            Err(e) => return report(AttachResult::Failed(e.to_string())),
+        }
     };
     // So "Back" on the waiting screen interrupts this thread's blocking
     // reads rather than abandoning them forever.
@@ -242,6 +431,16 @@ fn attach(
     });
 }
 
+/// A command the library runs, ready for a job thread — the closure shape
+/// [`JobScreen::spawn`] takes.
+type JobFn = Box<dyn FnOnce(&mut dyn commands_lib::Progress) -> crate::core::Result<()> + Send>;
+
+/// A provider by its registry key, the way every home screen gets back to
+/// the provider that opened it.
+fn provider_by_key(key: &str) -> Option<&'static dyn SimProvider> {
+    sims::registry().iter().map(|p| &**p).find(|p| p.key() == key)
+}
+
 impl eframe::App for CoachGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Transitions first, drawing second: a result that arrived since the
@@ -270,8 +469,77 @@ impl eframe::App for CoachGui {
                         }
                     }
                 });
+                // Clicking a sim opens its sheet of actions, not an attach:
+                // a sim is also the thing you record and learn from, and
+                // Coach Live is one button on that sheet.
                 if let Some(provider) = chosen {
-                    self.begin_attach(provider);
+                    self.phase =
+                        GuiPhase::Home(SimHome::new(provider.key(), provider.name()));
+                }
+            }
+            GuiPhase::Home(home) => {
+                let mut action = HomeAction::None;
+                let frame = egui::Frame::central_panel(&ctx.style())
+                    .inner_margin(egui::Margin::same(16));
+                egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+                    action = home.render(ui, &mut self.settings);
+                });
+                // Cloned before the call: the phase borrow must end before
+                // the phase can change.
+                let home = home.clone();
+                self.run_home_action(home, action);
+            }
+            GuiPhase::Capture(screen) => {
+                let out = screen.render(ctx);
+                let home = screen.home.clone();
+                match out {
+                    CaptureOut::None => {}
+                    CaptureOut::Back => self.phase = GuiPhase::Home(home),
+                    CaptureOut::Run(capture) => {
+                        let action = screen.action;
+                        self.run_capture_job(home, action, capture);
+                    }
+                }
+            }
+            GuiPhase::Learn(screen) => {
+                let out = screen.render(ctx);
+                let home = screen.home.clone();
+                match out {
+                    LearnOut::None => {}
+                    LearnOut::Back => self.phase = GuiPhase::Home(home),
+                    LearnOut::Run(captures) => self.run_learn_job(home, captures),
+                }
+            }
+            GuiPhase::Record(screen) => {
+                let out = screen.render(ctx);
+                let home = screen.home.clone();
+                match out {
+                    RecordOut::None => {}
+                    RecordOut::Back => self.phase = GuiPhase::Home(home),
+                    RecordOut::Start { laps } => self.run_record_job(home, laps),
+                }
+            }
+            GuiPhase::Export(screen) => {
+                let out = screen.render(ctx);
+                let home = screen.home.clone();
+                match out {
+                    ExportOut::None => {}
+                    ExportOut::Back => self.phase = GuiPhase::Home(home),
+                    ExportOut::Run { sessions_dir, out } => {
+                        self.run_export_job(home, sessions_dir, out);
+                    }
+                }
+            }
+            GuiPhase::Job(job) => {
+                if job.render(ctx) {
+                    // Leaving a running job does not kill it: a learn that
+                    // is nearly done should still write its model. A
+                    // recording is different — abandoning it without the
+                    // stop flag means it records forever — so Back stops it
+                    // first and the thread flushes on its own.
+                    let home = job.home.clone();
+                    job.request_stop();
+                    self.phase = GuiPhase::Home(home);
                 }
             }
             GuiPhase::Waiting { sim_name, stop, .. } => {
@@ -323,9 +591,13 @@ impl eframe::App for CoachGui {
         // *now*, so the process exits with nothing running rather than
         // racing the detached pipeline to the exit code. Only the Live phase
         // owns threads; a waiting attach thread observes its stop flag and
-        // winds down on its own.
+        // winds down on its own — and so does a recording, whose thread
+        // flushes and finishes its capture once its flag is set.
         if let GuiPhase::Live(app) = &mut self.phase {
             app.shutdown();
+        }
+        if let GuiPhase::Job(job) = &self.phase {
+            job.request_stop();
         }
     }
 }
@@ -387,5 +659,74 @@ mod tests {
             panic!("expected the waiting phase");
         };
         assert_eq!(sim_name, "Assetto Corsa");
+    }
+
+    /// The home sheet is the picker's destination now, and every action on
+    /// it lands somewhere real — these are the transitions that make the
+    /// CLI's surface a screen.
+    #[test]
+    fn every_home_action_lands_on_a_screen() {
+        type Check = fn(&GuiPhase) -> bool;
+        let home = SimHome::new("ac", "Assetto Corsa");
+        let cases: [(HomeAction, Check); 7] = [
+            (HomeAction::Record, |p| matches!(p, GuiPhase::Record(_))),
+            (HomeAction::Inspect, |p| matches!(p, GuiPhase::Capture(_))),
+            (HomeAction::Learn, |p| matches!(p, GuiPhase::Learn(_))),
+            (HomeAction::LearnPb, |p| matches!(p, GuiPhase::Capture(_))),
+            (HomeAction::Analyse, |p| matches!(p, GuiPhase::Capture(_))),
+            (HomeAction::Export, |p| matches!(p, GuiPhase::Export(_))),
+            (HomeAction::Back, |p| matches!(p, GuiPhase::Picking)),
+        ];
+        for (action, check) in cases {
+            let mut gui = CoachGui::new(PathBuf::from("data/tracks"), 1.0);
+            gui.phase = GuiPhase::Home(home.clone());
+            gui.run_home_action(home.clone(), action.clone());
+            assert!(
+                check(&gui.phase),
+                "{action:?} did not land on its screen: {:?}",
+                gui.phase_name()
+            );
+        }
+    }
+
+    #[test]
+    fn coach_live_from_the_home_sheet_attaches_to_that_sim() {
+        let home = SimHome::new("ac", "Assetto Corsa");
+        let mut gui = CoachGui::new(PathBuf::from("data/tracks"), 1.0);
+        gui.phase = GuiPhase::Home(home.clone());
+        gui.run_home_action(home, HomeAction::CoachLive);
+        let GuiPhase::Waiting { sim_name, .. } = &gui.phase else {
+            panic!("expected the waiting phase");
+        };
+        assert_eq!(sim_name, "Assetto Corsa");
+    }
+
+    /// Learning is a job like any other: the ticked captures spawn the
+    /// library call on a thread, and the screen is the job screen.
+    #[test]
+    fn learning_from_the_sheet_runs_a_job() {
+        let home = SimHome::new("ac", "Assetto Corsa");
+        let mut gui = CoachGui::new(PathBuf::from("data/tracks"), 1.0);
+        gui.phase = GuiPhase::Home(home.clone());
+        gui.run_learn_job(home, vec![PathBuf::from("ndjson_data/none.ndjson.gz")]);
+        let GuiPhase::Job(job) = &gui.phase else {
+            panic!("expected the job phase");
+        };
+        assert_eq!(job.title, "Coach Learn");
+        assert!(job.running());
+    }
+
+    /// A recording job carries a stop flag — the Stop button has to have
+    /// something to stop.
+    #[test]
+    fn a_recording_from_the_sheet_carries_a_stop_flag() {
+        let home = SimHome::new("ac", "Assetto Corsa");
+        let mut gui = CoachGui::new(PathBuf::from("data/tracks"), 1.0);
+        gui.phase = GuiPhase::Home(home.clone());
+        gui.run_record_job(home, Some(3));
+        let GuiPhase::Job(job) = &gui.phase else {
+            panic!("expected the job phase");
+        };
+        assert!(job.stop.is_some(), "the Stop button needs the flag");
     }
 }

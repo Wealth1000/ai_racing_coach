@@ -94,6 +94,20 @@ impl SimProvider for AssettoCorsa {
     fn record(&self, opts: &RecordOptions) -> Result<RecordSummary> {
         record::record::<shared_memory::AcPages>(opts)
     }
+
+    /// On Windows: coach live with a session capture running alongside, in
+    /// the same logger format `record` writes — one shared-memory reader
+    /// feeding both. Other builds keep the trait default (the pages only
+    /// exist on Windows), so callers fall back to plain live coaching.
+    #[cfg(windows)]
+    fn live_with_recording(
+        &self,
+        out_dir: &Path,
+    ) -> Result<Box<dyn TelemetrySource>> {
+        Ok(Box::new(
+            shared_memory::AcSharedMemorySource::with_recording(out_dir),
+        ))
+    }
 }
 
 #[cfg(test)]

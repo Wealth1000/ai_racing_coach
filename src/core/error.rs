@@ -98,6 +98,13 @@ pub enum CoachError {
     /// here at all.
     #[error("live telemetry from {sim} is not supported in this build")]
     LiveAttachUnsupported { sim: String },
+
+    /// The provider can coach live but cannot record while doing so (no live
+    /// reader in this build, or one that has no recorder). The caller falls
+    /// back to plain live coaching — the recording is a byproduct, and its
+    /// absence must not cost the session.
+    #[error("recording while coaching is not supported for {sim} in this build")]
+    LiveRecordUnsupported { sim: String },
 }
 
 /// Every provider's verdict on a capture none of them would open, formatted

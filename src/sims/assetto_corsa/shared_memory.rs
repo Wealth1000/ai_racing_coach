@@ -519,6 +519,10 @@ pub struct SharedMemorySource<R: PageStore> {
     /// Checked inside every wait, so shutdown does not depend on the sim
     /// publishing anything ever again.
     stop: Option<Arc<AtomicBool>>,
+    /// The session capture, when coaching was asked to keep recording (the
+    /// record-while-coaching setting). Writing it is best-effort: a failed
+    /// capture must never end the coaching — see [`Self::with_recording`].
+    recorder: Option<super::record::LiveRecorder>,
     /// The last attach failure, so the waiting message prints once per
     /// *distinct* reason rather than once per retry.
     last_wait_message: Option<String>,
@@ -551,6 +555,7 @@ impl<R: PageStore> SharedMemorySource<R> {
             store: None,
             assembler: FrameAssembler::default(),
             stop: None,
+            recorder: None,
             last_wait_message: None,
             session: None,
             samples: 0,
@@ -558,6 +563,21 @@ impl<R: PageStore> SharedMemorySource<R> {
             poll_every: PHYSICS_POLL,
             retry_every: ATTACH_RETRY,
         }
+    }
+
+    /// Coach live *and* record: every frame the coach sees is also written to
+    /// a capture in `out_dir`, in the logger's format, so the session's laps
+    /// can refine the track model later (`learn-track` accepts the capture
+    /// alongside the originals).
+    ///
+    /// The recording is a byproduct, not a promise: if writing it fails — a
+    /// full disk, a read-only directory — the source says so once and keeps
+    /// coaching without it. A broken capture is lost laps; broken coaching
+    /// is a lost session.
+    pub fn with_recording(out_dir: impl Into<std::path::PathBuf>) -> Self {
+        let mut source = Self::new();
+        source.recorder = Some(super::record::LiveRecorder::new(out_dir.into()));
+        source
     }
 
     fn stopped(&self) -> bool {
@@ -616,6 +636,7 @@ impl<R: PageStore> SharedMemorySource<R> {
                     }
                     self.session = Some(SessionInfo::from_ac_frame(&frame));
                 }
+                self.record_frame(&physics, &graphics);
                 self.samples += 1;
                 let track_length = self
                     .session
@@ -628,6 +649,50 @@ impl<R: PageStore> SharedMemorySource<R> {
             // again. Same handling for both reasons: they are both "the
             // state has not changed enough to matter yet".
             Err(_) => StepOutcome::Nothing,
+        }
+    }
+
+    /// Hand one emitted frame to the session recorder, if there is one.
+    ///
+    /// Frames that predate the static page are not recorded: the recorder
+    /// needs the page to name the file (track and car), and a frame without
+    /// it has no session to belong to. A write failure is warned about once
+    /// and drops the recorder — coaching is the product, the capture the
+    /// byproduct.
+    fn record_frame(
+        &mut self,
+        physics: &PhysicsPage,
+        graphics: &GraphicsPage,
+    ) {
+        let Some(recorder) = self.recorder.as_mut() else {
+            return;
+        };
+        let Some(static_page) = self.assembler.static_page() else {
+            return;
+        };
+        let position = self
+            .assembler
+            .last_position()
+            .expect("an emitted frame always has a position");
+        let timestamp = self
+            .assembler
+            .last_frame()
+            .map(|f| f.timestamp)
+            .expect("an emitted frame is the last frame");
+        let sequence = self.assembler.sequence();
+        if let Err(e) = recorder.on_frame(
+            physics,
+            graphics,
+            static_page,
+            position,
+            timestamp,
+            sequence,
+        ) {
+            eprintln!("warning: session recording stopped — {e}");
+            // Drop, don't retry: whatever made the write fail (full disk,
+            // read-only directory) is not something polling fixes, and every
+            // further frame would fail the same way.
+            self.recorder = None;
         }
     }
 }
@@ -683,11 +748,17 @@ impl<R: PageStore> TelemetrySource for SharedMemorySource<R> {
     }
 
     fn describe(&self) -> String {
+        let recording = self
+            .recorder
+            .as_ref()
+            .and_then(|r| r.path())
+            .map(|p| format!(", recording to {}", p.display()))
+            .unwrap_or_default();
         match &self.session {
             None => "Assetto Corsa, waiting for the sim (not attached yet)".to_string(),
             Some(s) => format!(
-                "Assetto Corsa live — {} in {} ({} m, {})",
-                s.car, s.track, s.track_length, s.sim_version
+                "Assetto Corsa live — {} in {} ({} m, {}){}",
+                s.car, s.track, s.track_length, s.sim_version, recording
             ),
         }
     }
@@ -1470,5 +1541,57 @@ mod tests {
             "{msg}"
         );
         assert_eq!(source.stats().samples, 0, "the frame was not handed on");
+    }
+
+    /// The record-while-coaching setting, end to end: a source built with
+    /// [`SharedMemorySource::with_recording`] coaches off the pages and
+    /// leaves behind a capture the pipeline's own replay reader accepts —
+    /// the interchange contract holding for coaching captures exactly as it
+    /// does for the logger's.
+    #[test]
+    fn a_recording_source_leaves_a_replayable_capture_of_the_coached_frames() {
+        script_stable_session();
+        let dir = std::env::temp_dir().join("coach_live_record_tests/round_trip");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut source =
+            SharedMemorySource::<FakeStore>::with_recording(dir.clone());
+        source.poll_every = Duration::from_micros(100);
+        source.retry_every = Duration::from_micros(100);
+        for _ in 0..5 {
+            assert!(source.next_sample().unwrap().is_some(), "coaching streams");
+        }
+        assert!(
+            source.describe().contains("recording to"),
+            "the connection line says where the laps are going: {}",
+            source.describe()
+        );
+        drop(source); // the session ends: the recorder finishes the gzip stream
+
+        let path = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .expect("one capture in the directory")
+            .unwrap()
+            .path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("telemetry_ac_monza_ks_ferrari_sf70h_")
+                && name.ends_with(".ndjson.gz"),
+            "the capture is named for the session it coached: {name}"
+        );
+
+        let mut replay =
+            crate::sims::assetto_corsa::NdjsonReplaySource::open(&path)
+                .expect("the coaching capture reopens like the logger's");
+        assert!(replay.next_sample().unwrap().is_some(), "a first frame");
+        let session = replay.session().expect("the session is in the capture");
+        assert_eq!(session.track.track, "monza");
+        assert_eq!(session.car, "ks_ferrari_sf70h");
+        let mut frames = 1;
+        while replay.next_sample().unwrap().is_some() {
+            frames += 1;
+        }
+        assert_eq!(frames, 5, "every coached frame was recorded");
     }
 }

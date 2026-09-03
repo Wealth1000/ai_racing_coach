@@ -55,6 +55,10 @@ winresource = "0.1"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Memory",
+    # The GUI-default launch path hides the console a double-clicked exe owns
+    # (main.rs `hide_owned_console`): process-list + window APIs.
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [features]

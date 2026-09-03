@@ -1,32 +1,23 @@
 //! `coach` — command-line entry point.
 //!
-//! Deliberately thin: parse arguments, drive the library, print. Every piece of
-//! analysis lives in the library so that tests can reach it, which the previous
-//! version could not do — the crate had no lib target, so `main.rs` was the only
-//! place code could live and nothing in it was testable.
+//! Deliberately thin: parse arguments, dispatch, print. Every command's
+//! implementation lives in the library ([`ai_racing_coach::commands`]) so
+//! that the GUI runs the same code the terminal does, and everything in
+//! there is testable. What stays here is the process-level wiring the
+//! library cannot own: `live` and `gui`, which wire threads, sinks and a
+//! window and end only when the process does.
+//!
+//! Running `coach` with no subcommand opens the coaching window — the
+//! double-click path. Every command stays available under its own name for
+//! terminals and scripts.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::Ordering;
 
 use clap::{Parser, Subcommand};
 
-use ai_racing_coach::audio::FeedbackSink;
-use ai_racing_coach::coaching::{ControllerMode, DefaultPhraser, advise_pass};
-use ai_racing_coach::core::config::{CoachConfig, InputDevice};
-use ai_racing_coach::core::sample::Sample;
-use ai_racing_coach::features::FeatureParams;
-use ai_racing_coach::features::ReferenceStore;
-use ai_racing_coach::features::corner::{self, TrackCorner};
-use ai_racing_coach::features::corner_features;
-use ai_racing_coach::features::curvature;
-use ai_racing_coach::features::lap::{Lap, LapTracker};
-use ai_racing_coach::features::resample::{self, ResampledLap};
-use ai_racing_coach::features::track_model::{LearnParams, ModelCorner, TrackModel};
-use ai_racing_coach::models::rules::RuleModel;
-use ai_racing_coach::runtime;
-use ai_racing_coach::sims;
-use ai_racing_coach::telemetry::{PrefixedSource, TelemetrySource};
+use ai_racing_coach::commands::{self, Progress};
+use ai_racing_coach::features::resample;
 
 #[derive(Parser)]
 #[command(
@@ -37,13 +28,19 @@ use ai_racing_coach::telemetry::{PrefixedSource, TelemetrySource};
     // `after_help` rather than `after_long_help` so short `-h` shows it too —
     // `-h` is what anyone actually types.
     after_help = "\
+Running `coach` with no command opens the coaching window.
+
 Examples:
+  coach                                       open the coaching window
+                                              (what a double-clicked exe does)
   coach inspect telemetry_ac.ndjson         analyse the fastest clean lap
   coach inspect capture.ndjson.gz           gzipped captures work directly
   coach inspect capture.ndjson --all-laps   one corner table per clean lap
   coach inspect capture.ndjson --step 0.5   finer distance grid (default 1 m)
 
   coach learn-track capture.ndjson.gz       write data/tracks/<track>.json
+  coach learn-track a.ndjson b.ndjson       several captures vote together —
+                                            the refinement loop
   coach learn-track capture.ndjson --dry-run   show the model, write nothing
 
   coach analyse capture.ndjson.gz           how the fastest lap drove each
@@ -63,8 +60,9 @@ Examples:
 Run `coach help <command>` for the full description of a command."
 )]
 struct Cli {
+    /// Omitted: open the coaching window, as a double-clicked exe does.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 /// Parse a flag that must be a positive, finite number of metres.
@@ -125,14 +123,20 @@ enum Command {
     /// laps. Pedal traces inside the confirmed arcs yield the decision events
     /// — brake onset/release, throttle dip/pickup, flat-out flicks.
     ///
+    /// Several captures of the same track and car vote together: re-learning
+    /// from the original capture plus the ones later sessions recorded is how
+    /// a model is refined rather than replaced.
+    ///
     /// A corner straddling the start/finish line is stored as two rows linked
     /// by `parent_id`; it is one corner, not two.
     LearnTrack {
-        /// An `.ndjson` or `.ndjson.gz` capture from the logger.
-        capture: PathBuf,
-        /// Which simulator's provider to open the capture, by key (e.g. "ac").
-        /// Omit to offer the file to every registered provider and use the
-        /// first that recognises it.
+        /// One or more `.ndjson` / `.ndjson.gz` captures from the logger, all
+        /// of the same track in the same car.
+        #[arg(required = true)]
+        captures: Vec<PathBuf>,
+        /// Which simulator's provider to open the captures, by key (e.g.
+        /// "ac"). Omit to offer each file to every registered provider and
+        /// use the first that recognises it.
         #[arg(long, value_name = "KEY")]
         sim: Option<String>,
 
@@ -309,6 +313,10 @@ enum Command {
 
     /// Open the coaching window: pick a sim, wait for the car, get coached.
     ///
+    /// This is also what running `coach` with no command does — the
+    /// double-click path; the subcommand exists so the flag set
+    /// (`--replay`, `--sim`, …) stays reachable from a terminal.
+    ///
     /// Without `--replay` the window starts at a sim picker; picking one
     /// shows a waiting screen until the car is on track, the stream is
     /// announced in text and voice, and coaching begins. With `--replay`, a
@@ -339,44 +347,79 @@ enum Command {
     },
 }
 
+/// The CLI's [`Progress`]: results to stdout, warnings to stderr — the
+/// convention every one of these commands has always printed under.
+struct Stdio;
+
+impl Progress for Stdio {
+    fn line(&mut self, text: &str) {
+        println!("{text}");
+    }
+    fn warn(&mut self, text: &str) {
+        eprintln!("{text}");
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Inspect {
+        // The double-click path: no command, no terminal, straight to the
+        // coaching window with the same defaults `coach gui` uses.
+        None => gui(
+            None,
+            Path::new("data/tracks"),
+            resample::DEFAULT_STEP_M,
+            None,
+        ),
+        Some(Command::Inspect {
             capture,
             sim,
             step,
             all_laps,
-        } => inspect(&capture, sim.as_deref(), step, all_laps),
-        Command::LearnTrack {
-            capture,
+        }) => commands::inspect(&capture, sim.as_deref(), step, all_laps, &mut Stdio),
+        Some(Command::LearnTrack {
+            captures,
             sim,
             out,
             step,
             dry_run,
-        } => learn_track(&capture, sim.as_deref(), &out, step, dry_run),
-        Command::Analyse {
+        }) => commands::learn_track(&captures, sim.as_deref(), &out, step, dry_run, &mut Stdio),
+        Some(Command::Analyse {
             capture,
             sim,
             model_dir,
             step,
             all_laps,
-        } => analyse(&capture, sim.as_deref(), &model_dir, step, all_laps),
-        Command::LearnPb {
+        }) => commands::analyse(
+            &capture,
+            sim.as_deref(),
+            &model_dir,
+            step,
+            all_laps,
+            &mut Stdio,
+        ),
+        Some(Command::LearnPb {
             capture,
             sim,
             model_dir,
             step,
             dry_run,
-        } => learn_pb(&capture, sim.as_deref(), &model_dir, step, dry_run),
-        Command::Live {
+        }) => commands::learn_pb(
+            &capture,
+            sim.as_deref(),
+            &model_dir,
+            step,
+            dry_run,
+            &mut Stdio,
+        ),
+        Some(Command::Live {
             replay,
             sim,
             model_dir,
             step,
             voice,
             record_session,
-        } => live(
+        }) => live(
             replay.as_deref(),
             &model_dir,
             step,
@@ -384,23 +427,30 @@ fn main() -> ExitCode {
             voice,
             record_session.as_deref(),
         ),
-        Command::Record {
+        Some(Command::Record {
             out,
             laps,
             plain,
             sim,
-        } => record(out.as_deref(), laps, plain, sim.as_deref()),
-        Command::ExportDataset {
+        }) => commands::record(
+            out.as_deref(),
+            laps,
+            plain,
+            sim.as_deref(),
+            None,
+            &mut Stdio,
+        ),
+        Some(Command::ExportDataset {
             sessions_dir,
             out,
             model_dir,
-        } => export_dataset(&sessions_dir, &out, &model_dir),
-        Command::Gui {
+        }) => commands::export_dataset(&sessions_dir, &out, &model_dir, &mut Stdio),
+        Some(Command::Gui {
             replay,
             sim,
             model_dir,
             step,
-        } => gui(replay.as_deref(), &model_dir, step, sim.as_deref()),
+        }) => gui(replay.as_deref(), &model_dir, step, sim.as_deref()),
     };
 
     match result {
@@ -415,361 +465,6 @@ fn main() -> ExitCode {
                 source = s.source();
             }
             ExitCode::FAILURE
-        }
-    }
-}
-
-/// Open a capture and split it into laps.
-///
-/// Shared by every subcommand: reading samples, honouring the provider's
-/// verdict on the capture and finding lap boundaries is the same work
-/// regardless of what is done with the laps afterwards. The source is
-/// returned alongside them because it owns the
-/// [`ai_racing_coach::core::SessionInfo`] and the read statistics.
-///
-/// Takes no grid spacing: laps here are raw samples at the source's own rate.
-/// Resampling onto a distance grid happens per-lap in the callers.
-fn read_laps(
-    capture: &Path,
-    sim: Option<&str>,
-) -> ai_racing_coach::Result<(Box<dyn TelemetrySource>, Vec<Lap>)> {
-    let mut source = sims::open_capture(capture, sim)?;
-
-    // Track length comes from the session the source discovers on its first
-    // sample. The previous implementation estimated it from lap groupings and
-    // got 29.9 m for a 4,286 m circuit.
-    let mut tracker: Option<LapTracker> = None;
-    let mut laps: Vec<Lap> = Vec::new();
-
-    while let Some(mut sample) = source.next_sample()? {
-        let tracker = tracker.get_or_insert_with(|| {
-            let length = source
-                .session()
-                .expect("the first sample carries the session")
-                .track_length;
-            LapTracker::new(length)
-        });
-        if let Some(lap) = tracker.push(&mut sample) {
-            laps.push(lap);
-        }
-    }
-
-    if let Some(tracker) = tracker {
-        laps.extend(tracker.finish());
-    }
-
-    Ok((source, laps))
-}
-
-fn inspect(
-    capture: &Path,
-    sim: Option<&str>,
-    step: f32,
-    all_laps: bool,
-) -> ai_racing_coach::Result<()> {
-    let (source, laps) = read_laps(capture, sim)?;
-    println!("{}", source.describe());
-
-    println!();
-    print_source_stats(&*source);
-    println!();
-    print_lap_table(&laps);
-
-    let clean: Vec<&Lap> = laps.iter().filter(|l| l.quality.is_clean()).collect();
-    if clean.is_empty() {
-        println!("\nNo clean laps — nothing to analyse.");
-        return Ok(());
-    }
-
-    // Fastest clean lap by default; the rest on request.
-    let mut ordered = clean.clone();
-    ordered.sort_by(|a, b| a.lap_time_s().total_cmp(&b.lap_time_s()));
-    let chosen: &[&Lap] = if all_laps { &ordered } else { &ordered[..1] };
-
-    for lap in chosen {
-        println!();
-        analyse_lap(lap, step);
-    }
-
-    Ok(())
-}
-
-/// `coach learn-track` — build the canonical corner set and save it.
-fn learn_track(
-    capture: &Path,
-    sim: Option<&str>,
-    out_dir: &Path,
-    step: f32,
-    dry_run: bool,
-) -> ai_racing_coach::Result<()> {
-    let (source, laps) = read_laps(capture, sim)?;
-    println!("{}", source.describe());
-
-    let session = source
-        .session()
-        .ok_or_else(|| ai_racing_coach::CoachError::EmptyCapture {
-            path: capture.display().to_string(),
-        })?;
-
-    let params = LearnParams { step_m: step };
-    let model = TrackModel::learn(session, &laps, &capture.display().to_string(), &params)?;
-
-    println!();
-    print_model(&model);
-
-    let path = TrackModel::path_in(out_dir, model.sim, &model.track);
-
-    // The file name keys on track and layout only, so learning the same circuit
-    // in a second car lands on this same path. That is not a mistake — a model
-    // is per-car by construction (see the track_model module docs) and there is
-    // no car-independent answer to fall back on — but it must not be silent,
-    // because the two cars genuinely disagree about the corner count and the
-    // last command run would otherwise decide the model with no trace.
-    if let Ok(existing) = TrackModel::load(&path) {
-        println!("\nReplacing the model at {}", path.display());
-        println!(
-            "  was: {} corners from {} lap(s) of {}",
-            existing.corners.len(),
-            existing.lap_count(),
-            existing.provenance.car,
-        );
-        println!(
-            "  now: {} corners from {} lap(s) of {}",
-            model.corners.len(),
-            model.lap_count(),
-            model.provenance.car,
-        );
-        if existing.provenance.car != model.provenance.car {
-            println!(
-                "  note: different car — boundaries shift with speed, so this is a \
-                 different model of the same circuit, not a correction of the old one"
-            );
-        }
-    }
-
-    if dry_run {
-        println!("\n--dry-run: nothing written (would be {})", path.display());
-        return Ok(());
-    }
-
-    // The sim's directory may not exist yet — learning the first model of a
-    // newly added sim is exactly when it does not — but `save` creates parent
-    // directories itself, so there is nothing to do here.
-    model.save(&path)?;
-    println!("\nWrote {}", path.display());
-    Ok(())
-}
-
-fn print_model(model: &TrackModel) {
-    let (left, right) = model.direction_counts();
-    println!(
-        "Track model v{} — {} ({}), {:.0} m\n  \
-         {} corners ({} right / {} left), learned from {} clean lap(s) in {}\n  \
-         reference {}, line spread {:.2} m mean, {:.2} m worst at {:.0} m, {:.2} m grid\n  \
-         estimator: {}",
-        model.version,
-        model.track,
-        model.provenance.car,
-        model.track_length_m,
-        model.corners.len(),
-        right,
-        left,
-        model.lap_count(),
-        model.provenance.capture,
-        model.provenance.reference_lap,
-        model.provenance.reference_spread_m,
-        model.provenance.reference_spread_max_m,
-        model.provenance.reference_spread_max_at_m,
-        model.provenance.step_m,
-        model.provenance.estimator,
-    );
-    if !model.provenance.pedal_events {
-        println!("  no usable pedal channels: decision events were not learned");
-    }
-
-    println!(
-        "\n  {:>4}  {:>3}  {:>8}  {:>8}  {:>7}  {:>8}  {:>7}  {:>8}  {:>7}  {:>6}",
-        "turn", "dir", "start", "end", "length", "apex", "radius", "turn", "laps", "events"
-    );
-    for c in &model.corners {
-        let radius = match c.apex_radius_m() {
-            Some(r) => format!("{r:>6.0}m"),
-            None => "     --".to_string(),
-        };
-        // The second half of a line-straddling corner is the same corner as
-        // its parent; the count of rows would otherwise read as one turn too
-        // many.
-        let id = match c.parent_id {
-            Some(parent) => format!("{:>2}+{parent}", c.id.to_string()),
-            None => format!("{:>4}", c.id.to_string()),
-        };
-        println!(
-            "  {id}  {:>3}  {:>7.0}m  {:>7.0}m  {:>6.0}m  {:>7.0}m  {radius}  {:>7.0}°  {:>4}/{}  {:>6}",
-            c.direction.short(),
-            c.start_m,
-            c.end_m,
-            c.length_m(),
-            c.apex_m,
-            c.turn_degrees(),
-            c.support,
-            model.lap_count(),
-            c.decision_events.len(),
-        );
-    }
-    print_unanimity(&model.corners, model.lap_count());
-
-    // Confirmed decision boundaries, once per corner, in the driver's terms.
-    let eventful: Vec<&ModelCorner> = model
-        .corners
-        .iter()
-        .filter(|c| !c.decision_events.is_empty())
-        .collect();
-    if !eventful.is_empty() {
-        println!("\n  decision events:");
-        for c in eventful {
-            let events: Vec<String> = c
-                .decision_events
-                .iter()
-                .map(|e| format!("{} {:.0}m ({})", e.kind.name(), e.distance_m, e.support))
-                .collect();
-            println!("    turn {}: {}", c.id, events.join(", "));
-        }
-    }
-}
-
-/// Flag the corners not every lap found. These are where the model is least
-/// certain, and they are the first thing to check when it looks wrong.
-///
-/// Both halves of a line-straddling corner report the same numbers, so the
-/// parent row alone is listed.
-fn print_unanimity(corners: &[ModelCorner], laps: u32) {
-    let split: Vec<&ModelCorner> = corners
-        .iter()
-        .filter(|c| c.parent_id.is_none() && c.support < laps)
-        .collect();
-    if split.is_empty() {
-        println!("\n  all {laps} laps agreed on every corner");
-        return;
-    }
-    let names: Vec<String> = split
-        .iter()
-        .map(|c| format!("{} ({}/{}, {:.0}%)", c.id, c.support, laps, c.match_fraction * 100.0))
-        .collect();
-    println!("\n  not unanimous: {}", names.join(", "));
-}
-
-/// `coach analyse` — per-corner driving numbers against a learned model.
-///
-/// The model supplies *where* the corners are; extraction reports *what each
-/// clean lap did inside them*. Only clean laps are analysed, for the same
-/// reason [`TrackModel::learn`] only lets clean laps vote: a spin's numbers
-/// are facts about the spin, not about how the corner is driven.
-fn analyse(
-    capture: &Path,
-    sim: Option<&str>,
-    model_dir: &Path,
-    step: f32,
-    all_laps: bool,
-) -> ai_racing_coach::Result<()> {
-    let (source, laps) = read_laps(capture, sim)?;
-    println!("{}", source.describe());
-
-    let session = source
-        .session()
-        .ok_or_else(|| ai_racing_coach::CoachError::EmptyCapture {
-            path: capture.display().to_string(),
-        })?;
-
-    let model = runtime::load_model_for_session(session, model_dir)?;
-    let reference = runtime::load_reference_for_session(session, &model, model_dir);
-
-    println!();
-    println!(
-        "Model {} — {} corners learned from {} lap(s) of {}",
-        model.track,
-        model.corners.len(),
-        model.lap_count(),
-        model.provenance.car,
-    );
-
-    let clean: Vec<&Lap> = laps.iter().filter(|l| l.quality.is_clean()).collect();
-    if clean.is_empty() {
-        println!("\nNo clean laps — nothing to analyse.");
-        return Ok(());
-    }
-
-    // Fastest clean lap by default, matching `inspect`.
-    let mut ordered = clean.clone();
-    ordered.sort_by(|a, b| a.lap_time_s().total_cmp(&b.lap_time_s()));
-    let chosen: &[&Lap] = if all_laps { &ordered } else { &ordered[..1] };
-
-    let params = FeatureParams::default();
-
-    for lap in chosen {
-        println!();
-        let Some(grid) = resample::resample_lap(&lap.samples, step) else {
-            println!(
-                "lap {}: not enough distinct positions to resample",
-                lap.id.0
-            );
-            continue;
-        };
-        let features = corner_features::extract_all(&model, &grid, &params, lap.id);
-        if features.is_empty() {
-            println!(
-                "lap {} ({:.2}s): no model corner is fully covered by this lap",
-                lap.id.0,
-                lap.lap_time_s()
-            );
-            continue;
-        }
-        println!(
-            "lap {} — {:.2}s, {} corners driven",
-            lap.id.0,
-            lap.lap_time_s(),
-            features.len()
-        );
-        print_feature_table(&features);
-        print_advice(&model, &reference, &features);
-    }
-
-    Ok(())
-}
-
-/// The advice the rules raise for one lap's features — the same sentences,
-/// from the same shared mapping, that `coach live` delivers as they happen.
-///
-/// Unthrottled on purpose: this is the complete, unfiltered set, so it can be
-/// compared line for line with what a live session would say before the
-/// don't-disturb-the-driver layer starts suppressing repeats.
-fn print_advice(
-    model: &TrackModel,
-    reference: &ReferenceStore,
-    features: &[ai_racing_coach::features::CornerFeatures],
-) {
-    let rules = RuleModel::default();
-    let phraser = DefaultPhraser;
-    let mode = ControllerMode::default();
-
-    let mut lines = Vec::new();
-    for f in features {
-        // Corner ids are sequential from zero, so the id indexes the list.
-        let Some(corner) = model.corners.get(f.corner_id.0 as usize) else {
-            continue;
-        };
-        let report = corner.parent_id.unwrap_or(corner.id);
-        for advice in advise_pass(&rules, &phraser, mode, f, report, reference.pass_for(f.corner_id))
-        {
-            lines.push(advice.phrased);
-        }
-    }
-
-    if lines.is_empty() {
-        println!("\n  advice: nothing the rules would raise for this lap");
-    } else {
-        println!("\n  advice (unthrottled — everything the rules raise):");
-        for line in lines {
-            println!("    {line}");
         }
     }
 }
@@ -824,6 +519,10 @@ fn live(
     voice: VoiceChoice,
     record_session: Option<&Path>,
 ) -> ai_racing_coach::Result<()> {
+    use ai_racing_coach::audio::FeedbackSink;
+    use ai_racing_coach::core::config::{CoachConfig, InputDevice};
+    use ai_racing_coach::telemetry::PrefixedSource;
+
     // The source, and how the config names where its samples come from. A
     // live attach never fails here: the source starts in its waiting state
     // and the first `next_sample` below holds until the sim runs, saying why
@@ -831,17 +530,40 @@ fn live(
     // live session, not an error.
     let (mut source, input, sim_name) = match replay {
         Some(capture) => (
-            sims::open_capture(capture, sim)?,
+            ai_racing_coach::sims::open_capture(capture, sim)?,
             InputDevice::Replay {
                 capture: capture.to_path_buf(),
             },
             None,
         ),
         None => {
-            let providers: Vec<&dyn sims::SimProvider> =
-                sims::registry().iter().map(|p| p.as_ref()).collect();
-            let provider = sims::provider_for_live(&providers, sim)?;
-            (provider.live()?, InputDevice::SharedMemory, Some(provider.name()))
+            let providers: Vec<&dyn ai_racing_coach::sims::SimProvider> =
+                ai_racing_coach::sims::registry().iter().map(|p| p.as_ref()).collect();
+            let provider = ai_racing_coach::sims::provider_for_live(&providers, sim)?;
+            // The record-while-coaching setting: the same capture the logger
+            // would write, as a byproduct of coaching, so the session's laps
+            // can refine the track model later. A build whose live reader has
+            // no recorder says so and loses only the byproduct, never the
+            // session.
+            let source =
+                if ai_racing_coach::core::Settings::load().record_while_coaching {
+                    match provider.live_with_recording(std::path::Path::new(
+                        ai_racing_coach::core::CAPTURES_DIR,
+                    )) {
+                        Ok(source) => source,
+                        Err(ai_racing_coach::CoachError::LiveRecordUnsupported { sim }) => {
+                            eprintln!(
+                                "warning: {sim} cannot record while coaching in this \
+                                 build — coaching without a session capture"
+                            );
+                            provider.live()?
+                        }
+                        Err(other) => return Err(other),
+                    }
+                } else {
+                    provider.live()?
+                };
+            (source, InputDevice::SharedMemory, Some(provider.name()))
         }
     };
     let first = source.next_sample()?.ok_or_else(|| match replay {
@@ -869,7 +591,7 @@ fn live(
 
     println!("{}", source.describe());
 
-    let model = runtime::load_model_for_session(&session, model_dir)?;
+    let model = ai_racing_coach::runtime::load_model_for_session(&session, model_dir)?;
     println!();
     println!(
         "Model {} — {} corners learned from {} lap(s) of {}",
@@ -878,7 +600,8 @@ fn live(
         model.lap_count(),
         model.provenance.car,
     );
-    let reference = runtime::load_reference_for_session(&session, &model, model_dir);
+    let reference =
+        ai_racing_coach::runtime::load_reference_for_session(&session, &model, model_dir);
 
     let voice_config: ai_racing_coach::core::VoiceConfig = voice.into();
     let config = CoachConfig {
@@ -891,8 +614,8 @@ fn live(
     // the fingerprint to stamp its header, and after `CoachPipeline::new` the
     // model is gone.
     let model_fingerprint = model.fingerprint();
-    let pipeline = runtime::CoachPipeline::new(model, reference, config);
-    let wiring = runtime::spawn(
+    let pipeline = ai_racing_coach::runtime::CoachPipeline::new(model, reference, config);
+    let wiring = ai_racing_coach::runtime::spawn(
         Box::new(PrefixedSource::new(first, source)),
         pipeline,
     );
@@ -904,7 +627,7 @@ fn live(
     // One counter shared by the voice and the recorder, so a session file's
     // `voice_skipped` quotes the same number the driver heard (or didn't).
     let voice_skipped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let mut sinks: Vec<Box<dyn ai_racing_coach::audio::FeedbackSink>> = match voice {
+    let mut sinks: Vec<Box<dyn FeedbackSink>> = match voice {
         VoiceChoice::Tts => vec![Box::new(
             ai_racing_coach::audio::TtsSink::connect(voice_skipped.clone()),
         )],
@@ -995,9 +718,9 @@ fn live(
     if let Some((_, w)) = writer.as_mut() {
         w.flush();
     }
-    let dropped_frames = wiring.dropped_frames.load(Ordering::Relaxed);
-    let dropped_advice = wiring.dropped_advice.load(Ordering::Relaxed);
-    let dropped_events = wiring.dropped_events.load(Ordering::Relaxed);
+    let dropped_frames = wiring.dropped_frames.load(std::sync::atomic::Ordering::Relaxed);
+    let dropped_advice = wiring.dropped_advice.load(std::sync::atomic::Ordering::Relaxed);
+    let dropped_events = wiring.dropped_events.load(std::sync::atomic::Ordering::Relaxed);
     wiring.join()?;
 
     if dropped_advice > 0 {
@@ -1012,54 +735,6 @@ fn live(
         println!("Session {id}: {recorded_events} events recorded");
     }
     println!("\n{spoken} advice, {dropped_frames} frames dropped");
-    Ok(())
-}
-
-/// `coach record` — the C# logger's job: capture live telemetry from the
-/// running sim, in the logger's own NDJSON.
-///
-/// Thin by design — the waiting, polling, skip accounting and lap counting
-/// live in the provider (`sims::assetto_corsa::record`), where a scripted
-/// fake page store can test every path; all this does is pick the provider
-/// and report what the recorder saw.
-fn record(
-    out: Option<&Path>,
-    laps: Option<u32>,
-    plain: bool,
-    sim: Option<&str>,
-) -> ai_racing_coach::Result<()> {
-    let providers: Vec<&dyn sims::SimProvider> =
-        sims::registry().iter().map(|p| p.as_ref()).collect();
-    let provider = sims::provider_for_live(&providers, sim)?;
-    let opts = sims::RecordOptions {
-        out: out.map(Path::to_path_buf),
-        laps,
-        plain,
-    };
-    let summary = provider.record(&opts)?;
-
-    // A recording that never saw the car on track never resolved a file to
-    // write — that is worth saying plainly rather than reporting zero frames
-    // written to nowhere.
-    match &summary.path {
-        Some(path) => println!(
-            "Recorded {} frames ({}) to {}",
-            summary.frames,
-            match summary.laps_completed {
-                0 => "no laps completed".to_string(),
-                n => format!("{n} lap(s)"),
-            },
-            path.display()
-        ),
-        None => println!("No frames recorded — the sim never published a session"),
-    }
-    let skipped = summary.skipped_no_position + summary.skipped_duplicate + summary.skipped_no_session;
-    if skipped > 0 {
-        println!(
-            "Skipped {skipped} polls: {} before the car was on track, {} duplicates, {} without a session",
-            summary.skipped_no_position, summary.skipped_duplicate, summary.skipped_no_session
-        );
-    }
     Ok(())
 }
 
@@ -1083,7 +758,7 @@ fn gui(
 ) -> ai_racing_coach::Result<()> {
     let app: Box<dyn eframe::App> = match replay {
         Some(capture) => {
-            let mut source = sims::open_capture(capture, sim)?;
+            let mut source = ai_racing_coach::sims::open_capture(capture, sim)?;
             let first = source.next_sample()?.ok_or_else(|| {
                 ai_racing_coach::CoachError::EmptyCapture {
                     path: capture.display().to_string(),
@@ -1098,24 +773,27 @@ fn gui(
                 })?
                 .clone();
 
-            let model = runtime::load_model_for_session(&session, model_dir)?;
-            let reference = runtime::load_reference_for_session(&session, &model, model_dir);
+            let model = ai_racing_coach::runtime::load_model_for_session(&session, model_dir)?;
+            let reference =
+                ai_racing_coach::runtime::load_reference_for_session(&session, &model, model_dir);
 
-            let config = CoachConfig {
-                input: InputDevice::Replay {
+            let config = ai_racing_coach::core::config::CoachConfig {
+                input: ai_racing_coach::core::config::InputDevice::Replay {
                     capture: capture.to_path_buf(),
                 },
                 step_m: step,
                 models_dir: model_dir.to_path_buf(),
                 voice: Default::default(),
             };
-            let pipeline = runtime::CoachPipeline::new(model, reference, config);
+            let pipeline = ai_racing_coach::runtime::CoachPipeline::new(model, reference, config);
             // The connection indicator's text, captured before the source
             // moves into the wiring — the UI thread never sees the source
             // itself, only what it calls itself.
             let source_desc = source.describe();
-            let wiring =
-                runtime::spawn(Box::new(PrefixedSource::new(first, source)), pipeline);
+            let wiring = ai_racing_coach::runtime::spawn(
+                Box::new(ai_racing_coach::telemetry::PrefixedSource::new(first, source)),
+                pipeline,
+            );
 
             // The GUI speaks the advice; the terminal does not echo it.
             let voice_skipped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1134,7 +812,7 @@ fn gui(
             {
                 return Err(ai_racing_coach::CoachError::UnknownSim {
                     key: key.to_string(),
-                    known: sims::registry()
+                    known: ai_racing_coach::sims::registry()
                         .iter()
                         .map(|p| p.key())
                         .collect::<Vec<_>>()
@@ -1144,6 +822,14 @@ fn gui(
             Box::new(gui)
         }
     };
+
+    // A double-clicked exe (or `coach` with no command) owns the console
+    // Windows spawned for it, and nobody is reading that console — hide it,
+    // so the window is the program. A terminal launch keeps its console:
+    // there is someone reading it, and `coach gui --replay … 2>err.log`
+    // must still work.
+    #[cfg(windows)]
+    hide_owned_console();
 
     // The window-manager icon (taskbar/alt-tab on Linux too); the Windows exe
     // additionally carries the same art as an embedded .ico resource via
@@ -1167,417 +853,51 @@ fn gui(
     })
 }
 
+/// Hide the console window this process owns — the one Windows spawned when
+/// the exe was double-clicked.
+///
+/// `GetConsoleProcessList` tells the two launch modes apart: a double-click
+/// makes this process the console's only member, while a terminal launch
+/// shares the console with the shell (two or more). Only the owned console
+/// is hidden — hiding the shell's would blank the terminal the driver is
+/// reading. The console is hidden rather than detached so stdout still has
+/// somewhere to go if anything ever writes to it.
+///
+/// Windows-only and unverifiable on the Linux dev machine; the release
+/// workflow's windows-latest run compiles it (same arrangement as the
+/// shared-memory mapping layer — see build.rs and Cargo.toml).
+#[cfg(windows)]
+fn hide_owned_console() {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleProcessList, GetConsoleWindow,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+
+    // One page of process ids is plenty: the question is "are we alone?",
+    // not "who else is there".
+    let mut processes = [0u32; 16];
+    let count = unsafe { GetConsoleProcessList(processes.as_mut_ptr(), 16) };
+    if count == 1 {
+        unsafe {
+            let console = GetConsoleWindow();
+            if !console.is_null() {
+                ShowWindow(console, SW_HIDE);
+            }
+        }
+    }
+}
+
 /// Translate a pipeline event into its session-file record. The pipeline
 /// speaks runtime terms; the session file speaks storage terms; this is the
 /// only place they meet, because the mapping is trivially structural —
 /// except that advice never appears here (it travels the advice channel,
 /// where the sinks can hear it).
-fn session_event(event: runtime::RuntimeEvent) -> ai_racing_coach::storage::SessionEvent {
+fn session_event(event: ai_racing_coach::runtime::RuntimeEvent) -> ai_racing_coach::storage::SessionEvent {
     use ai_racing_coach::storage::SessionEvent;
     match event {
-        runtime::RuntimeEvent::LapBoundary { lap, time_s, clean } => {
+        ai_racing_coach::runtime::RuntimeEvent::LapBoundary { lap, time_s, clean } => {
             SessionEvent::LapBoundary { lap, time_s, clean }
         }
-        runtime::RuntimeEvent::Pass(f) => SessionEvent::Pass(f),
-    }
-}
-
-/// `coach export-dataset` — flatten recorded sessions into one CSV row per
-/// corner pass.
-///
-/// The model and personal best are selected the same way `live` selects
-/// them, from the session header's own track and car, so an export joins
-/// exactly the corner set the session was coached against. A session
-/// recorded against a different fingerprint of the model is refused rather
-/// than mis-joined.
-fn export_dataset(sessions_dir: &Path, out: &Path, model_dir: &Path) -> ai_racing_coach::Result<()> {
-    let mut sessions: Vec<PathBuf> = std::fs::read_dir(sessions_dir)
-        .map_err(|e| ai_racing_coach::CoachError::Io {
-            path: sessions_dir.display().to_string(),
-            source: e,
-        })?
-        .map_while(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "ndjson"))
-        .collect();
-    sessions.sort();
-    if sessions.is_empty() {
-        return Err(ai_racing_coach::CoachError::NotEnoughData {
-            action: "export a dataset",
-            detail: format!(
-                "no .ndjson session files in {} — record one with `coach live --record-session`",
-                sessions_dir.display()
-            ),
-        });
-    }
-
-    // The first session's header decides which model (and personal best)
-    // every session is joined against; the fingerprint check inside the
-    // exporter then holds the rest to it.
-    let first = ai_racing_coach::storage::read_session(&sessions[0])?;
-    let model_path = TrackModel::path_in(model_dir, first.header.sim, &first.header.track);
-    if !model_path.exists() {
-        return Err(ai_racing_coach::CoachError::NotEnoughData {
-            action: "export a dataset",
-            detail: format!(
-                "no model for {} at {} — learn one first with `coach learn-track`",
-                first.header.track,
-                model_path.display()
-            ),
-        });
-    }
-    let model = TrackModel::load(&model_path)?;
-
-    let pb_path = ReferenceStore::path_in(model_dir, first.header.sim, &first.header.track);
-    let reference = match ReferenceStore::load(&pb_path) {
-        Ok(store)
-            if store.compatible_with(first.header.sim, &first.header.car, model.fingerprint()) =>
-        {
-            Some(store)
-        }
-        Ok(_) => {
-            eprintln!(
-                "warning: the personal best at {} was recorded for a different car or an \
-                 earlier model of this track — exporting without reference columns",
-                pb_path.display()
-            );
-            None
-        }
-        Err(_) => None,
-    };
-
-    let info = ai_racing_coach::storage::export_dataset(
-        &sessions,
-        &model,
-        reference.as_ref(),
-        out,
-    )?;
-    println!(
-        "{} rows, {} columns — {}",
-        info.rows,
-        info.columns,
-        out.display()
-    );
-    Ok(())
-}
-
-/// One row per corner: speeds in km/h, distances in metres relative to the
-/// corner they belong to, everything a rule will compare between laps.
-fn print_feature_table(features: &[ai_racing_coach::features::CornerFeatures]) {
-    let kmh = |mps: f32| format!("{:>5.0}", mps * 3.6);
-
-    println!(
-        "\n  {:>4}  {:>3}  {:>5}  {:>5}  {:>5}  {:>6}  {:>6}  {:>5}  {:>6}  {:>6}  {:>5}  {:>3}",
-        "turn",
-        "dir",
-        "in",
-        "apex",
-        "out",
-        "vmin@",
-        "brake@",
-        "trail",
-        "power@",
-        "time",
-        "slip",
-        "off"
-    );
-    for f in features {
-        let vmin_at = format!("{:+.0}m", f.speed_min_offset_m);
-        // Signed offset of the braking point from the corner boundary:
-        // negative is before the corner, positive is braking past it.
-        let brake_at = match f.braking_length_m {
-            Some(len) => format!("{:+.0}m", -len),
-            None => "   --".to_string(),
-        };
-        let power_at = match f.throttle_pickup_offset_m {
-            Some(off) => format!("{off:+.0}m"),
-            None => "   --".to_string(),
-        };
-        let slip_deg = f.peak_abs_slip_rad.to_degrees();
-
-        println!(
-            "  {:>4}  {:>3}  {}  {}  {}  {vmin_at:>6}  {brake_at:>6}  {:>5}  {power_at:>6}  \
-             {:>5.2}s  {slip_deg:>4.1}\u{00b0}  {:>3}",
-            f.corner_id.to_string(),
-            f.direction.short(),
-            kmh(f.entry_speed_mps),
-            kmh(f.apex_speed_mps),
-            kmh(f.exit_speed_mps),
-            if f.trail_braking { "yes" } else { "-" },
-            f.time_in_corner_s,
-            f.off_track_points,
-        );
-    }
-}
-
-/// `coach learn-pb` — record the best pass through each corner.
-///
-/// Clean laps only, for the same reason as everywhere else: a spin through
-/// T7 is a fact about the spin, and a personal best is not allowed to be one.
-fn learn_pb(
-    capture: &Path,
-    sim: Option<&str>,
-    model_dir: &Path,
-    step: f32,
-    dry_run: bool,
-) -> ai_racing_coach::Result<()> {
-    let (source, laps) = read_laps(capture, sim)?;
-    println!("{}", source.describe());
-
-    let session = source
-        .session()
-        .ok_or_else(|| ai_racing_coach::CoachError::EmptyCapture {
-            path: capture.display().to_string(),
-        })?;
-
-    let model = runtime::load_model_for_session(session, model_dir)?;
-
-    let mut grids: Vec<(ai_racing_coach::core::ids::LapId, ResampledLap)> = Vec::new();
-    let mut unresampled = 0usize;
-    for lap in laps.iter().filter(|l| l.quality.is_clean()) {
-        match resample::resample_lap(&lap.samples, step) {
-            Some(grid) => grids.push((lap.id, grid)),
-            None => unresampled += 1,
-        }
-    }
-    if unresampled > 0 {
-        println!(
-            "\n{unresampled} clean lap(s) could not be put on the {step} m grid and were skipped"
-        );
-    }
-    if grids.is_empty() {
-        return Err(ai_racing_coach::CoachError::NotEnoughData {
-            action: "record personal bests",
-            detail: "no clean lap in the capture could be resampled".to_string(),
-        });
-    }
-
-    let incoming = ReferenceStore::harvest(
-        &model,
-        session.car.clone(),
-        &capture.display().to_string(),
-        step,
-        &FeatureParams::default(),
-        &grids,
-    )?;
-    if incoming.corners.is_empty() {
-        return Err(ai_racing_coach::CoachError::NotEnoughData {
-            action: "record personal bests",
-            detail: format!(
-                "none of the {} model corners was fully covered by any clean lap",
-                model.corners.len()
-            ),
-        });
-    }
-
-    let path = ReferenceStore::path_in(model_dir, session.sim, &session.track);
-
-    println!();
-    let store = if path.exists() {
-        let existing = ReferenceStore::load(&path)?;
-        if existing.compatible_with(session.sim, &session.car, model.fingerprint()) {
-            let mut merged = existing;
-            let report = merged.absorb(incoming);
-            println!("Merging into the existing personal best at {}:", path.display());
-            println!(
-                "  {} corner(s) improved, {} kept, {} added",
-                report.improved, report.kept, report.added
-            );
-            merged
-        } else {
-            println!("Existing personal best at {} cannot be merged:", path.display());
-            if existing.provenance.car != session.car {
-                println!(
-                    "  it was recorded in a {}, this capture is a {} — per-car numbers",
-                    existing.provenance.car, session.car
-                );
-            }
-            if existing.model_fingerprint != model.fingerprint() {
-                println!(
-                    "  the track model has been re-learned since; the stored corner \
-                     ordinals no longer mean the same places"
-                );
-            }
-            println!("  starting fresh from this capture");
-            incoming
-        }
-    } else {
-        incoming
-    };
-
-    print_pb_table(&store);
-
-    if dry_run {
-        println!("\n--dry-run: nothing written (would be {})", path.display());
-        return Ok(());
-    }
-
-    store.save(&path)?;
-    println!("\nWrote {}", path.display());
-    Ok(())
-}
-
-/// The personal best, one row per corner with the same conventions as
-/// `analyse`: speeds in km/h, distances signed relative to the boundary or
-/// apex they are measured from.
-fn print_pb_table(store: &ReferenceStore) {
-    println!(
-        "\nPersonal best — {}, {}, {} corner(s) recorded from {}",
-        store.track,
-        store.provenance.car,
-        store.corners.len(),
-        store.provenance.captures.join(", "),
-    );
-
-    println!(
-        "\n  {:>4}  {:>3}  {:>5}  {:>5}  {:>5}  {:>7}  {:>6}  {:>6}  {:>5}",
-        "turn", "dir", "in", "apex", "out", "time", "brake@", "power@", "trail"
-    );
-    for c in &store.corners {
-        let brake_at = match c.brake_offset_m {
-            Some(off) => format!("{off:+.0}m"),
-            None => "   --".to_string(),
-        };
-        let power_at = match c.throttle_pickup_offset_m {
-            Some(off) => format!("{off:+.0}m"),
-            None => "   --".to_string(),
-        };
-
-        println!(
-            "  {:>4}  {:>3}  {:>5.0}  {:>5.0}  {:>5.0}  {:>6.2}s  {brake_at:>6}  {power_at:>6}  {:>5}",
-            c.corner_id.to_string(),
-            c.direction.short(),
-            c.entry_speed_mps * 3.6,
-            c.apex_speed_mps * 3.6,
-            c.exit_speed_mps * 3.6,
-            c.time_in_corner_s,
-            if c.trail_braking { "yes" } else { "-" },
-        );
-    }
-}
-
-fn print_source_stats(source: &dyn TelemetrySource) {
-    let stats = source.stats();
-    println!(
-        "Frames read     {}\nBlank lines     {}\nUnparseable     {}",
-        stats.samples, stats.blank_lines, stats.bad_lines
-    );
-}
-
-fn print_lap_table(laps: &[Lap]) {
-    println!("Laps ({} wrap segments)", laps.len());
-    println!(
-        "  {:>3}  {:>9}  {:>8}  {:>9}  {:>7}  {:<28}",
-        "id", "time", "coverage", "rotation", "samples", "quality"
-    );
-
-    for lap in laps {
-        // Rotation in units of pi is the readable form: a clean lap is 2.00,
-        // and the MX5's spin is 4.00.
-        let rotation_pi = lap.net_rotation / std::f32::consts::PI;
-        let mut note = lap.quality.reason().to_string();
-        if lap.sim_lap_time_ms.is_none() && lap.quality.is_clean() {
-            note.push_str(" (wall clock)");
-        }
-        println!(
-            "  {:>3}  {:>8.2}s  {:>7.1}%  {:>7.2}pi  {:>7}  {:<28}",
-            lap.id.0,
-            lap.lap_time_s(),
-            lap.coverage * 100.0,
-            rotation_pi,
-            lap.samples.len(),
-            note
-        );
-    }
-
-    let clean = laps.iter().filter(|l| l.quality.is_clean()).count();
-    let full = laps
-        .iter()
-        .filter(|l| l.quality != ai_racing_coach::features::LapQuality::Partial)
-        .count();
-    println!("  {} segments, {} full, {} clean", laps.len(), full, clean);
-}
-
-fn analyse_lap(lap: &Lap, step: f32) {
-    println!(
-        "Lap {} — {:.2}s, {} raw samples",
-        lap.id.0,
-        lap.lap_time_s(),
-        lap.samples.len()
-    );
-
-    // The health check for the resampling stage, printed because it is the one
-    // number that says whether corner detection can work at all.
-    let raw_zeros = curvature::zero_fraction(&curvature::signed_curvature(&lap.samples));
-
-    let Some(grid) = resample::resample_lap(&lap.samples, step) else {
-        println!("  not enough distinct positions to resample");
-        return;
-    };
-
-    let grid_zeros = curvature::zero_fraction(&curvature::signed_curvature(&grid.samples));
-    println!(
-        "  resampled to {} points @ {:.2} m ({} non-monotone samples dropped)",
-        grid.samples.len(),
-        grid.step_m,
-        grid.non_monotone_dropped
-    );
-    println!(
-        "  curvature zeros: {:.1}% raw -> {:.1}% resampled",
-        raw_zeros * 100.0,
-        grid_zeros * 100.0
-    );
-
-    let corners = corner::detect_corners(&grid);
-    let (left, right) = corner::direction_counts(&corners);
-    println!(
-        "  {} corners, {} right / {} left",
-        corners.len(),
-        right,
-        left
-    );
-
-    if corners.is_empty() {
-        return;
-    }
-    print_corner_table(&corners, &grid);
-}
-
-fn print_corner_table(corners: &[TrackCorner], grid: &ResampledLap) {
-    println!(
-        "\n  {:>4}  {:>3}  {:>8}  {:>8}  {:>7}  {:>7}  {:>7}  {:>8}  {:>8}",
-        "turn", "dir", "start", "end", "length", "apex", "radius", "turn", "min spd"
-    );
-    for c in corners {
-        let radius = match c.apex_radius_m() {
-            Some(r) => format!("{r:>6.0}m"),
-            None => "     --".to_string(),
-        };
-        println!(
-            "  {:>4}  {:>3}  {:>7.0}m  {:>7.0}m  {:>6.0}m  {:>6.0}m  {}  {:>7.0}°  {:>5.1}m/s",
-            c.id.to_string(),
-            c.direction.short(),
-            c.start_m,
-            c.end_m,
-            c.length_m(),
-            c.apex_m,
-            radius,
-            c.turn_degrees(),
-            c.min_speed,
-        );
-    }
-
-    // Speed at the apex is what a driver will ask about first, so give the
-    // straight-line context too: the fastest point on the lap.
-    if let Some(top) = grid
-        .samples
-        .iter()
-        .max_by(|a: &&Sample, b: &&Sample| a.speed.total_cmp(&b.speed))
-    {
-        println!(
-            "\n  top speed {:.1} km/h at {:.0} m",
-            top.speed * 3.6,
-            top.lap_distance
-        );
+        ai_racing_coach::runtime::RuntimeEvent::Pass(f) => SessionEvent::Pass(f),
     }
 }

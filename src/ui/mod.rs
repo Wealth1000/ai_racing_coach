@@ -10,7 +10,10 @@
 
 pub mod app;
 pub mod icon;
+pub mod job;
 pub mod launcher;
+pub mod screens;
+pub mod theme;
 
 pub use app::CoachApp;
 pub use icon::window_icon;
