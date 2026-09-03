@@ -189,6 +189,11 @@ pub(crate) fn interpolate(a: &Sample, b: &Sample, t: f32, distance: f32, step_m:
         gear: if t < 0.5 { a.gear } else { b.gear },
         tyres_out: if t < 0.5 { a.tyres_out } else { b.tyres_out },
         live: if t < 0.5 { a.live } else { b.live },
+        last_lap_time_ms: if t < 0.5 {
+            a.last_lap_time_ms
+        } else {
+            b.last_lap_time_ms
+        },
 
         rpm: lerp(a.rpm, b.rpm, t),
         surface_grip: lerp(a.surface_grip, b.surface_grip, t),
@@ -234,6 +239,7 @@ mod tests {
             live: true,
             surface_grip: 1.0,
             lap_time_ms: (distance * 10.0) as i32,
+            last_lap_time_ms: 0,
         }
     }
 

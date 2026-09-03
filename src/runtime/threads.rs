@@ -195,7 +195,7 @@ impl Drop for LiveWiring {
 /// The pipeline's own advice counters ([`CoachPipeline::spoken`]) are not
 /// observable from outside its thread; count what arrives on
 /// [`LiveWiring::advice_rx`] instead, and read `dropped_*` for what did not.
-pub fn spawn(source: Box<dyn TelemetrySource + Send>, pipeline: CoachPipeline) -> LiveWiring {
+pub fn spawn(source: Box<dyn TelemetrySource>, pipeline: CoachPipeline) -> LiveWiring {
     let (frame_tx, frame_rx) = bounded::<Sample>(FRAME_QUEUE);
     let (advice_tx, advice_rx) = bounded::<Advice>(ADVICE_QUEUE);
     let (event_tx, event_rx) = bounded::<RuntimeEvent>(EVENT_QUEUE);
@@ -206,27 +206,21 @@ pub fn spawn(source: Box<dyn TelemetrySource + Send>, pipeline: CoachPipeline) -
     let stop = Arc::new(AtomicBool::new(false));
     let failure: Arc<Mutex<Option<CoachError>>> = Arc::new(Mutex::new(None));
 
-    // Source thread: frames in, samples out. The first frame also fixes the
-    // track length (from the session the source discovers on reading it),
-    // which is why the conversion happens here rather than in the pipeline:
-    // the pipeline is pure Sample-in, advice-out.
+    // Source thread: samples in, samples out. The conversion from the sim's
+    // raw frames happened inside the provider's source — this thread is pure
+    // transport, which is why it knows nothing about any simulator.
     let frames_counter = Arc::clone(&dropped_frames);
     let failure_slot = Arc::clone(&failure);
     let source_stop = Arc::clone(&stop);
     let frame_drain = frame_rx.clone();
     let source_handle = std::thread::spawn(move || {
         let mut source = source;
-        let mut track_length: Option<f32> = None;
+        // A blocking live source (a shared-memory poll loop waiting for the
+        // sim) observes this flag inside its wait; a file source ignores it.
+        source.set_stop_flag(Arc::clone(&source_stop));
         while !source_stop.load(Ordering::Relaxed) {
-            match source.next_frame() {
-                Ok(Some(frame)) => {
-                    let length = track_length.get_or_insert_with(|| {
-                        source
-                            .session()
-                            .map(|s| s.track_length)
-                            .unwrap_or(frame.track_spline_length)
-                    });
-                    let sample = Sample::from_ac_frame(&frame, *length);
+            match source.next_sample() {
+                Ok(Some(sample)) => {
                     if !send_drop_oldest(&frame_tx, &frame_drain, sample, &frames_counter) {
                         // The pipeline is gone; nothing left to feed.
                         break;
@@ -336,11 +330,11 @@ mod tests {
     use crate::coaching::DecisionConfig;
     use crate::features::reference::ReferenceStore;
     use crate::features::track_model::TrackModel;
-    use crate::telemetry::NdjsonReplaySource;
+    use crate::sims::assetto_corsa::NdjsonReplaySource;
 
     const MONZA_CAPTURE: &str =
         "ndjson_data/telemetry_ac_monza_ks_ferrari_sf70h_20260902_161237.ndjson.gz";
-    const MONZA_MODEL: &str = "data/tracks/monza.json";
+    const MONZA_MODEL: &str = "data/tracks/ac/monza.json";
 
     fn permissive() -> DecisionConfig {
         DecisionConfig {
@@ -407,15 +401,10 @@ mod tests {
             .with_decision_config(permissive());
         let mut expected = Vec::new();
         let mut replay = NdjsonReplaySource::open(MONZA_CAPTURE).expect("reopen capture");
-        let mut track_length: Option<f32> = None;
-        while let Some(frame) = replay.next_frame().expect("read capture") {
-            let length = track_length.get_or_insert_with(|| {
-                replay
-                    .session()
-                    .map(|s| s.track_length)
-                    .unwrap_or(frame.track_spline_length)
-            });
-            expected.extend(direct.on_sample(&Sample::from_ac_frame(&frame, *length)));
+        // The source converts internally with its own session's track length,
+        // so the direct drive sees bit-identical samples to the thread.
+        while let Some(sample) = replay.next_sample().expect("read capture") {
+            expected.extend(direct.on_sample(&sample));
         }
         expected.extend(direct.finish());
 

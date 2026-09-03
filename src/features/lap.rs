@@ -36,7 +36,6 @@
 use crate::core::ids::LapId;
 use crate::core::math::{TAU, angle_delta};
 use crate::core::sample::Sample;
-use crate::telemetry::frame::AcFrame;
 
 /// A drop in `lap_frac` larger than this is a start/finish crossing.
 ///
@@ -119,20 +118,22 @@ pub struct Lap {
     /// Frames where the sim was not live, or the car was in the pits.
     pub not_live_frames: u32,
 
-    /// AC's own time for this lap, in ms, when it can be trusted.
+    /// The sim's own authoritative time for this lap, in ms, when it can be
+    /// trusted.
     ///
-    /// `None` when logging began mid-lap, because AC's figure then includes time
-    /// before the capture started.
-    pub ac_lap_time_ms: Option<i32>,
+    /// `None` when logging began mid-lap, because the sim's figure then
+    /// includes time before the capture started.
+    pub sim_lap_time_ms: Option<i32>,
     /// Wall-clock duration from the first to the last sample. Always available,
     /// but a wall clock: it keeps running while the sim is paused.
     pub wall_duration_ms: i64,
 }
 
 impl Lap {
-    /// Best available lap time in seconds: AC's if trustworthy, else wall clock.
+    /// Best available lap time in seconds: the sim's if trustworthy, else
+    /// wall clock.
     pub fn lap_time_s(&self) -> f32 {
-        match self.ac_lap_time_ms {
+        match self.sim_lap_time_ms {
             Some(ms) => ms as f32 / 1000.0,
             None => self.wall_duration_ms as f32 / 1000.0,
         }
@@ -323,12 +324,14 @@ pub struct LapTracker {
     started_at_wrap: bool,
 }
 
-/// A lap awaiting AC's `iLastTime`, which arrives a few frames after the line.
+/// A lap awaiting the sim's latched lap time, which arrives a few frames
+/// after the line.
 struct PendingLap {
     lap: Lap,
     frames_waited: u32,
     /// Whether this lap began at a crossing we actually saw. The opening segment
-    /// of a capture did not, so AC's time for it counts laps we never logged.
+    /// of a capture did not, so the sim's time for it counts laps we never
+    /// logged.
     started_at_wrap: bool,
 }
 
@@ -345,13 +348,12 @@ impl LapTracker {
         }
     }
 
-    /// Feed one frame. Returns any lap that just became complete.
-    pub fn push(&mut self, frame: &AcFrame) -> Option<Lap> {
-        let mut sample = Sample::from_ac_frame(frame, self.track_length);
-
+    /// Feed one sample, mutably: the boundary detector clamps small backward
+    /// steps in place. Returns any lap that just became complete.
+    pub fn push(&mut self, sample: &mut Sample) -> Option<Lap> {
         // Clamp + wrap detection live in the shared detector so the runtime
         // pipeline sees the same lap boundaries this tracker does.
-        let wrapped = self.boundary.push(&mut sample, self.track_length);
+        let wrapped = self.boundary.push(sample, self.track_length);
 
         let mut emitted = None;
 
@@ -366,31 +368,31 @@ impl LapTracker {
             self.started_at_wrap = true;
         }
 
-        // Resolve a lap that was waiting for AC's authoritative time.
+        // Resolve a lap that was waiting for the sim's authoritative time.
         if let Some(p) = &mut self.pending {
             p.frames_waited += 1;
             if p.frames_waited >= LAST_TIME_LATCH_FRAMES {
                 let mut p = self.pending.take().expect("checked above");
-                let agrees = (frame.i_last_time as i64 - p.lap.wall_duration_ms).abs()
+                let agrees = (sample.last_lap_time_ms as i64 - p.lap.wall_duration_ms).abs()
                     < AC_TIME_AGREEMENT_MS;
-                if p.started_at_wrap && frame.i_last_time > 0 && agrees {
-                    p.lap.ac_lap_time_ms = Some(frame.i_last_time);
+                if p.started_at_wrap && sample.last_lap_time_ms > 0 && agrees {
+                    p.lap.sim_lap_time_ms = Some(sample.last_lap_time_ms);
                 }
                 emitted = Some(p.lap);
             }
         }
 
-        // Accumulate this frame into the lap being built. The scorer sees the
+        // Accumulate this sample into the lap being built. The scorer sees the
         // same clamped sample the boundary detector produced, so its coverage
         // and wall-duration match what the buffered samples would say.
-        self.scorer.push(&sample);
-        self.current.push(sample);
+        self.scorer.push(sample);
+        self.current.push(*sample);
 
         emitted
     }
 
-    /// Flush what is left at end of stream: any lap still waiting for AC's
-    /// `iLastTime`, then the trailing fragment.
+    /// Flush what is left at end of stream: any lap still waiting for the
+    /// sim's latched lap time, then the trailing fragment.
     ///
     /// Returns **only** laps that [`Self::push`] has not already handed back, so
     /// a caller that collects both never sees a lap twice.
@@ -421,7 +423,7 @@ impl LapTracker {
             net_rotation: score.net_rotation,
             off_track_frames: score.off_track_frames,
             not_live_frames: score.not_live_frames,
-            ac_lap_time_ms: None,
+            sim_lap_time_ms: None,
             wall_duration_ms: score.wall_duration_ms,
         }
     }

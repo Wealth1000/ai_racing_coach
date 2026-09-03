@@ -8,7 +8,7 @@ use ai_racing_coach::features::corner::{self, CornerParams};
 use ai_racing_coach::features::curvature;
 use ai_racing_coach::features::lap::LapTracker;
 use ai_racing_coach::features::resample;
-use ai_racing_coach::telemetry::replay::NdjsonReplaySource;
+use ai_racing_coach::sims::assetto_corsa::NdjsonReplaySource;
 use ai_racing_coach::telemetry::TelemetrySource;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,16 +19,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tracker_opt: Option<LapTracker> = None;
     let mut lap_count = 0;
 
-    while let Some(frame) = source.next_frame()? {
+    while let Some(mut sample) = source.next_sample()? {
         if tracker_opt.is_none() {
+            // The provider sets the session facts on the first sample,
+            // including the track length its conversion used.
             let track_length = source
                 .session()
-                .map(|s| s.track_length)
-                .unwrap_or(frame.track_spline_length);
+                .expect("the first sample carries the session")
+                .track_length;
             tracker_opt = Some(LapTracker::new(track_length));
         }
         let tracker = tracker_opt.as_mut().unwrap();
-        if let Some(lap) = tracker.push(&frame) {
+        if let Some(lap) = tracker.push(&mut sample) {
             if !lap.quality.is_clean() {
                 continue;
             }
@@ -79,6 +81,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|v| v.abs())
                     .sum();
                 integral[win_half] = sum;
+                // The window slides by subtracting one distant element and
+                // adding another; an iterator rewrite would hide which is
+                // which, so the index arithmetic stays explicit.
+                #[allow(clippy::needless_range_loop)]
                 for i in (win_half + 1)..(profiles.magnitude.len() - win_half) {
                     sum -= profiles.magnitude[i - win_half - 1].abs();
                     sum += profiles.magnitude[i + win_half].abs();

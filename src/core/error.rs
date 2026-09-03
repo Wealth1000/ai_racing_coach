@@ -77,6 +77,46 @@ pub enum CoachError {
     /// itself is fine; only the surface the driver watches it on is not.
     #[error("the GUI failed: {detail}")]
     Ui { detail: String },
+
+    /// No provider in the registry recognised a capture. Carries each
+    /// provider's reason for declining, so the message says what was tried
+    /// rather than just that it failed — a foreign format is a diagnosis, not
+    /// a mystery.
+    #[error("{path} is not a recognised telemetry capture. Tried {attempts}")]
+    UnrecognisedCapture {
+        path: String,
+        attempts: CaptureAttempts,
+    },
+
+    /// `--sim` named a key no provider registered. Lists the keys that exist
+    /// so the fix is obvious.
+    #[error("unknown sim '{key}' — registered sims: {known}")]
+    UnknownSim { key: String, known: String },
+
+    /// The provider has no live reader in this build. Distinct from a live
+    /// reader that fails to attach: this sim's telemetry cannot be read live
+    /// here at all.
+    #[error("live telemetry from {sim} is not supported in this build")]
+    LiveAttachUnsupported { sim: String },
+}
+
+/// Every provider's verdict on a capture none of them would open, formatted
+/// for the [`CoachError::UnrecognisedCapture`] message.
+#[derive(Debug, Clone)]
+pub struct CaptureAttempts(pub Vec<(String, String)>);
+
+impl fmt::Display for CaptureAttempts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for (name, reason) in &self.0 {
+            if !first {
+                write!(f, "; ")?;
+            }
+            first = false;
+            write!(f, "{name} ({reason})")?;
+        }
+        Ok(())
+    }
 }
 
 impl CoachError {

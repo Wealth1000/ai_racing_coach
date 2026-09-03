@@ -3,9 +3,9 @@
 //! Pipeline shape, raw bytes to corners:
 //!
 //! ```text
-//!   .ndjson.gz  ──▶ telemetry::replay ──▶ AcFrame  (strict, AC-only)
-//!               ──▶ core::Sample                  (canonical units + signs)
-//!               ──▶ features::lap                 (lap boundaries + quality)
+//!   .ndjson.gz  ──▶ sims::assetto_corsa       (strict AC schema, AC-only)
+//!               ──▶ core::Sample              (canonical units + signs)
+//!               ──▶ features::lap             (lap boundaries + quality)
 //!               ──▶ features::resample            (fixed 1 m distance grid)
 //!               ──▶ features::curvature/corner    (corner geometry)
 //!               ──▶ features::track_model         (the canonical corner set)
@@ -40,8 +40,9 @@ pub mod core;
 pub mod features;
 pub mod models;
 pub mod runtime;
+pub mod sims;
 pub mod storage;
 pub mod telemetry;
 pub mod ui;
 
-pub use crate::core::{CoachError, Result};
+pub use crate::core::{CaptureAttempts, CoachError, Result};

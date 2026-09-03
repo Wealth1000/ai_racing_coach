@@ -15,11 +15,18 @@ use crate::core::error::CoachError;
 /// (see [`crate::runtime::threads`]). Anything that can take seconds (a
 /// synthesiser speaking a sentence) belongs on its own thread behind its own
 /// non-blocking gate, which is exactly what [`TtsSink`] does.
-pub trait FeedbackSink {
+pub trait FeedbackSink: Send {
     /// Deliver one piece of advice. `Err` means the sink itself is broken
     /// (disk full, channel closed); a *degraded* delivery (nothing to hear,
     /// backend missing) is still `Ok` — the session continues in silence.
     fn deliver(&mut self, advice: &Advice) -> Result<(), CoachError>;
+
+    /// Say one line that is not advice — the "{sim} stream picked up"
+    /// announcement, session start and end. Not coaching, so it cannot fail
+    /// a session: sinks that have nothing to do with it (the session
+    /// recorder) ignore it, and the voice speaks it with the same
+    /// skip-when-busy rule as advice.
+    fn say(&mut self, _text: &str) {}
 
     /// Flush anything buffered. Called once, at end of session.
     fn flush(&mut self) {}
@@ -30,12 +37,15 @@ pub trait FeedbackSink {
 pub struct NullSink {
     /// Every advice handed to the sink, in delivery order.
     pub delivered: Vec<Advice>,
+    /// Every announcement handed to [`FeedbackSink::say`], in order.
+    pub said: Vec<String>,
 }
 
 impl NullSink {
     pub fn new() -> Self {
         Self {
             delivered: Vec::new(),
+            said: Vec::new(),
         }
     }
 }
@@ -51,11 +61,15 @@ impl FeedbackSink for NullSink {
         self.delivered.push(advice.clone());
         Ok(())
     }
+
+    fn say(&mut self, text: &str) {
+        self.said.push(text.to_string());
+    }
 }
 
 /// The synthesiser behind [`TtsSink`], abstracted so the skip-when-busy
 /// logic is testable without a speech daemon.
-pub trait Speech {
+pub trait Speech: Send {
     /// Begin speaking a line. This may take as long as the line takes to say
     /// — the caller guarantees it is only called when [`Speech::
     /// is_speaking`] reported the synth idle.
@@ -232,6 +246,19 @@ impl<S: Speech> FeedbackSink for TtsSink<S> {
         self.spoken += 1;
         Ok(())
     }
+
+    /// Announcements ride the same skip-when-busy rule as advice: a stream
+    /// announcement is worth saying, but not worth interrupting coaching
+    /// for. Counted in the same `spoken`/`skipped` account so the numbers
+    /// still reconcile.
+    fn say(&mut self, text: &str) {
+        let busy = self.speech.is_speaking().unwrap_or(true);
+        if busy || self.speech.speak(text).is_err() {
+            let _ = self.skip();
+        } else {
+            self.spoken += 1;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -340,6 +367,31 @@ mod tests {
     }
 
     #[test]
+    fn announcements_speak_when_idle_and_skip_when_busy() {
+        let mut sink = mock();
+        sink.say("Assetto Corsa stream picked up");
+        assert_eq!(sink.spoken, 1);
+        assert_eq!(sink.speech.spoken, vec!["Assetto Corsa stream picked up".to_string()]);
+
+        // Busy synth: the announcement is dropped, never queued, and counted
+        // in the same account as skipped advice.
+        sink.say("session ending");
+        assert_eq!(sink.spoken, 1);
+        assert_eq!(sink.skipped.load(Ordering::Relaxed), 1);
+        assert_eq!(sink.speech.spoken.len(), 1);
+    }
+
+    #[test]
+    fn null_sink_records_announcements_in_order() {
+        let mut sink = NullSink::new();
+        sink.say("first");
+        sink.deliver(&advice("coaching")).expect("deliver");
+        sink.say("second");
+        assert_eq!(sink.said, vec!["first".to_string(), "second".to_string()]);
+        assert_eq!(sink.delivered.len(), 1);
+    }
+
+    #[test]
     fn tts_sink_without_a_backend_skips_every_line() {
         let skipped = Arc::new(AtomicU64::new(0));
         let mut sink = TtsSink::with_speech(UnavailableSpeech, skipped.clone());
@@ -362,12 +414,12 @@ mod tests {
         use crate::features::track_model::TrackModel;
         use crate::runtime::{CoachPipeline, Stage};
         use crate::telemetry::source::TelemetrySource;
-        use crate::telemetry::NdjsonReplaySource;
+        use crate::sims::assetto_corsa::NdjsonReplaySource;
         use std::time::Duration;
 
         const MONZA_CAPTURE: &str =
             "ndjson_data/telemetry_ac_monza_ks_ferrari_sf70h_20260902_161237.ndjson.gz";
-        const MONZA_MODEL: &str = "data/tracks/monza.json";
+        const MONZA_MODEL: &str = "data/tracks/ac/monza.json";
 
         let Ok(model) = TrackModel::load(MONZA_MODEL) else {
             eprintln!("skipping: {MONZA_MODEL} not present");
@@ -396,11 +448,10 @@ mod tests {
             });
 
         let mut sink = NullSink::new();
-        let mut track_length: Option<f32> = None;
-        while let Some(frame) = source.next_frame().expect("read capture") {
-            let length = track_length
-                .get_or_insert_with(|| source.session().map(|s| s.track_length).unwrap_or(0.0));
-            for a in pipeline.on_sample(&crate::core::Sample::from_ac_frame(&frame, *length)) {
+        // The source converts internally, so the pipeline is fed the samples
+        // exactly as the runtime thread would receive them.
+        while let Some(sample) = source.next_sample().expect("read capture") {
+            for a in pipeline.on_sample(&sample) {
                 sink.deliver(&a).expect("null sink cannot fail");
             }
         }

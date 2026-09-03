@@ -3,8 +3,9 @@
 `coach` reads Assetto Corsa telemetry captures and tells you what is in them: laps,
 corners, and a reusable model of the circuit.
 
-Everything here is offline. Nothing needs the sim running, or Windows — a capture on
-disk is all the input there is.
+Almost everything here is offline — a capture on disk is all the input there is. The
+exceptions are `coach record` and `coach live`/`coach gui` without `--replay`, which
+attach to the running sim (Windows only, see their sections).
 
 ---
 
@@ -34,6 +35,12 @@ If a capture has a `.meta.json` sidecar beside it, `coach` reads that **first**.
 logger writes its own verdict there, and if it recorded a fatal probe failure `coach`
 refuses to analyse the file rather than producing plausible numbers from known-bad data.
 Non-fatal sidecar notes print as `warning:` lines and analysis continues.
+
+Every capture-taking command also takes `--sim <key>` (e.g. `--sim ac`). Without it,
+`coach` asks each registered simulator provider whether the file is theirs — the first
+to recognise the first line wins, and if none does the error names every provider's
+reason. With it, only that provider is asked, and an unknown key is an error listing
+the registered ones.
 
 > **Paths with spaces need quoting.** The captures in this repo live in a directory
 > called `ndjson data/`, so every example below quotes the path. Forgetting the quotes
@@ -147,7 +154,7 @@ coach learn-track <capture> [--out <dir>] [--step <m>]
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--out <dir>` | `data/tracks` | Where to write `<track>_<layout>.json`. |
+| `--out <dir>` | `data/tracks` | Where to write `<sim>/<track>_<layout>.json`. |
 | `--step <m>` | `1.0` | Distance-grid spacing. Must be positive. |
 | `--min-support <f>` | `0.5` | Fraction of clean laps that must agree on a corner. `0`-`1`. |
 | `--apex-tolerance <m>` | `25` | How far apart two laps' apexes may be and still count as the same corner. |
@@ -218,7 +225,7 @@ is no car-independent answer to fall back on. But it is never silent: an overwri
 the old and new corner counts, and says so explicitly when the car changed.
 
 ```
-Replacing the model at data/tracks/ks_red_bull_ring_layout_gp.json
+Replacing the model at data/tracks/ac/ks_red_bull_ring_layout_gp.json
   was: 11 corners from 3 lap(s) of ks_mazda_mx5_cup
   now: 8 corners from 3 lap(s) of ks_ferrari_f138
   note: different car — boundaries shift with speed, so this is a different model
@@ -254,6 +261,53 @@ thresholds inside corner detection that are not exposed on the CLI yet.
 
 **Corners straddling the start/finish line are not handled.** On a circuit where a corner
 begins before the line and ends after it, expect the model to be wrong there.
+
+---
+
+## `coach record` — capture telemetry from the running sim
+
+Windows only. This is the C# logger's job done by the coach itself — one program on the
+sim machine instead of two. What it writes is the logger's own NDJSON, key for key, so
+`coach inspect`, `learn-track` and everything else cannot tell a `coach record` capture
+from a logger one.
+
+```bash
+coach record [--out <file>] [--laps <n>] [--plain] [--sim <key>]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--out <file>` | (see below) | Write here instead of the default name. **Never overwrites** an existing file. |
+| `--laps <n>` | unlimited | Stop after this many laps. |
+| `--plain` | off | Plain `.ndjson` instead of `.ndjson.gz`. |
+| `--sim <key>` | (the one sim) | Which provider to record from. Only needed once there are several. |
+
+The default file name is the logger's: `telemetry_ac_<track>_<car>_<stamp>.ndjson.gz` in
+the working directory, resolved once the sim has published its session (track and car
+come from the sim, so the name cannot exist before the first frame).
+
+`coach record` waits for the sim to start — "waiting for Assetto Corsa: …", saying why
+once per reason — then skips polls until the car is on track, and starts writing. Frame
+skipping follows the logger's rules exactly (no position, or a republished frame, is
+skipped and counted), and the summary at the end reports what was skipped.
+
+**Prefer `--laps` for a clean stop.** Without it, Ctrl-C ends the recording and costs the
+gzip trailer plus any line not yet flushed (at most 200). Everything written before that
+is readable.
+
+---
+
+## `coach live` and `coach gui` — coaching a session
+
+`coach live --replay <capture>` runs the whole pipeline over a capture at full speed,
+printing advice the moment each corner pass completes. `--voice null` keeps it silent;
+`--record-session <dir>` writes the session as it happens.
+
+On Windows, `coach live` without `--replay` attaches to the running sim instead: it
+waits for the sim, announces "Assetto Corsa stream picked up" (printed and spoken) when
+telemetry flows, and coaches from the first frame. `coach gui` opens at a sim picker —
+pick one and the window waits until the car is on track, announces the pickup, and
+coaches; `coach gui --replay <capture>` skips straight into the session.
 
 ---
 

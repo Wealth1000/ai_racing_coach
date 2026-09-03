@@ -21,6 +21,7 @@ use std::time::Duration;
 use eframe::egui;
 use eframe::egui::{Color32, ScrollArea, Sense};
 
+use crate::audio::{FeedbackSink, NullSink};
 use crate::coaching::Advice;
 use crate::models::issue::Severity;
 use crate::runtime::threads::LiveWiring;
@@ -91,16 +92,26 @@ pub fn severity_colour(severity: Severity) -> Color32 {
     }
 }
 
-/// The eframe app: a live session's consumer, rendered.
+/// The rendered half of a live session: its consumer end plus a voice.
 ///
-/// Constructed with the [`LiveWiring`] of an already-running session; the
-/// window closes when the user says so, and closing it ends the session
-/// (see the module docs on shutdown).
+/// Constructed with the [`LiveWiring`] of an already-running session and the
+/// [`FeedbackSink`] that speaks its advice — [`CoachApp::new`] defaults to
+/// the recording [`NullSink`], which is why the headless tests can drive the
+/// whole consumer loop. The window closes when the user says so, and closing
+/// it ends the session (see the module docs on shutdown).
+///
+/// This is not itself an eframe app: [`crate::ui::launcher::CoachGui`] owns
+/// the window and renders whichever phase the driver is in — one of which is
+/// this app, through [`CoachApp::render`].
 pub struct CoachApp {
     wiring: Option<LiveWiring>,
     /// `TelemetrySource::describe()`, captured once — the connection
     /// indicator's text.
     source_desc: String,
+    /// The session's voice. Every piece of advice drained in [`CoachApp::poll`]
+    /// is delivered here in arrival order, so what the driver hears is what
+    /// the feed shows.
+    sink: Box<dyn FeedbackSink>,
     /// Newest first, capped at [`FEED_CAP`].
     advice: VecDeque<AdviceRow>,
     /// Every piece of advice that ever arrived, including what the cap has
@@ -117,13 +128,23 @@ pub struct CoachApp {
 }
 
 impl CoachApp {
-    /// Wire the app to a running session. `source_desc` is
+    /// Wire the app to a running session, silently. `source_desc` is
     /// `TelemetrySource::describe()` — the UI thread never sees the source
     /// itself, only what it calls itself.
     pub fn new(wiring: LiveWiring, source_desc: String) -> Self {
+        Self::with_sink(wiring, source_desc, Box::new(NullSink::new()))
+    }
+
+    /// Wire the app to a running session with a voice.
+    pub fn with_sink(
+        wiring: LiveWiring,
+        source_desc: String,
+        sink: Box<dyn FeedbackSink>,
+    ) -> Self {
         CoachApp {
             wiring: Some(wiring),
             source_desc,
+            sink,
             advice: VecDeque::new(),
             advice_total: 0,
             lap: None,
@@ -132,9 +153,27 @@ impl CoachApp {
         }
     }
 
+    /// Say one announcement through the session's voice — the "{sim} stream
+    /// picked up" the launcher speaks the moment telemetry starts flowing.
+    pub fn say(&mut self, text: &str) {
+        self.sink.say(text);
+    }
+
+    /// Stop the session's threads and join them. Called by the launcher when
+    /// the window closes; `Drop` is the net for every other path.
+    pub fn shutdown(&mut self) {
+        if let Some(mut wiring) = self.wiring.take()
+            && let Err(e) = wiring.shutdown()
+        {
+            eprintln!("warning: the session source failed: {e}");
+        }
+    }
+
     /// Drain whatever has arrived since the last look. Never blocks; returns
     /// immediately having taken everything queued. This is the whole consumer
-    /// loop, factored out of `update` so a headless test can drive it.
+    /// loop, factored out of the repaint handler so a headless test can drive
+    /// it. Every drained piece of advice is also handed to the voice, so the
+    /// driver hears the session the window is showing.
     pub fn poll(&mut self) {
         let Some(wiring) = &self.wiring else {
             self.finished = true;
@@ -147,6 +186,11 @@ impl CoachApp {
         loop {
             match wiring.advice_rx.try_recv() {
                 Ok(advice) => {
+                    // The voice hears it before the feed does: a failed
+                    // delivery must not lose the row.
+                    if let Err(e) = self.sink.deliver(&advice) {
+                        eprintln!("warning: the voice failed: {e}");
+                    }
                     let row = AdviceRow::from_advice(&advice);
                     self.advice.push_front(row);
                     self.advice_total += 1;
@@ -229,8 +273,11 @@ impl CoachApp {
     }
 }
 
-impl eframe::App for CoachApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl CoachApp {
+    /// Drain, then draw: the status bar and the advice feed. The repaint
+    /// clock itself belongs to whoever owns the window (the launcher), since
+    /// the same 10 Hz that drives this feed also drives the waiting screen.
+    pub fn render(&mut self, ctx: &egui::Context) {
         self.poll();
 
         egui::TopBottomPanel::top("status").show(ctx, |ui| {
@@ -299,29 +346,16 @@ impl eframe::App for CoachApp {
             REPAINT
         });
     }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // The window is closing: stop the threads and join them *now*, so
-        // the process exits with nothing running rather than racing the
-        // detached pipeline to the exit code.
-        if let Some(mut wiring) = self.wiring.take()
-            && let Err(e) = wiring.shutdown()
-        {
-            eprintln!("warning: the session source failed: {e}");
-        }
-    }
 }
 
 impl Drop for CoachApp {
     fn drop(&mut self) {
-        // `on_close_event` normally did this already; `Drop` is the net for
-        // every other path (a panic in the UI, a caller that built the app
-        // but never ran the event loop). Joining can block, but only on a
-        // path that is already abnormal — and a briefly blocked exit beats
-        // a leaked pipeline thread every time.
-        if let Some(mut wiring) = self.wiring.take() {
-            wiring.shutdown().ok();
-        }
+        // The window closing normally called `shutdown` already; `Drop` is
+        // the net for every other path (a panic in the UI, a caller that
+        // built the app but never ran the event loop). Joining can block,
+        // but only on a path that is already abnormal — and a briefly
+        // blocked exit beats a leaked pipeline thread every time.
+        self.shutdown();
     }
 }
 
@@ -433,12 +467,12 @@ mod tests {
         use crate::features::reference::ReferenceStore;
         use crate::features::track_model::TrackModel;
         use crate::runtime::{CoachPipeline, spawn};
-        use crate::telemetry::NdjsonReplaySource;
+        use crate::sims::assetto_corsa::NdjsonReplaySource;
         use crate::telemetry::source::TelemetrySource;
 
         const MONZA_CAPTURE: &str =
             "ndjson_data/telemetry_ac_monza_ks_ferrari_sf70h_20260902_161237.ndjson.gz";
-        const MONZA_MODEL: &str = "data/tracks/monza.json";
+        const MONZA_MODEL: &str = "data/tracks/ac/monza.json";
 
         let Ok(model) = TrackModel::load(MONZA_MODEL) else {
             eprintln!("skipping: {MONZA_MODEL} not present");
@@ -448,9 +482,9 @@ mod tests {
             eprintln!("skipping: {MONZA_CAPTURE} not present");
             return;
         };
-        // The first frame carries the session facts the header-ish state
+        // The first sample carries the session facts the header-ish state
         // wants; feed it back through the loop below.
-        let mut first = source.next_frame().expect("read capture");
+        let mut first = source.next_sample().expect("read capture");
         let desc = source.describe();
 
         let config = CoachConfig {
@@ -470,19 +504,19 @@ mod tests {
                 info_enabled: true,
             });
 
-        // A source that yields the peeked frame then the rest — the app
+        // A source that yields the peeked sample then the rest — the app
         // construction must not consume the capture.
         struct Prefixed {
-            first: Option<crate::telemetry::frame::AcFrame>,
+            first: Option<crate::core::sample::Sample>,
             inner: NdjsonReplaySource,
         }
         impl TelemetrySource for Prefixed {
-            fn next_frame(&mut self) -> crate::core::error::Result<
-                Option<crate::telemetry::frame::AcFrame>,
-            > {
+            fn next_sample(
+                &mut self,
+            ) -> crate::core::error::Result<Option<crate::core::sample::Sample>> {
                 match self.first.take() {
-                    Some(f) => Ok(Some(f)),
-                    None => self.inner.next_frame(),
+                    Some(s) => Ok(Some(s)),
+                    None => self.inner.next_sample(),
                 }
             }
             fn session(&self) -> Option<&crate::core::sample::SessionInfo> {
