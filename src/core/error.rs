@@ -98,6 +98,19 @@ pub enum CoachError {
     /// here at all.
     #[error("live telemetry from {sim} is not supported in this build")]
     LiveAttachUnsupported { sim: String },
+
+    /// The provider can coach live but cannot record while doing so (no live
+    /// reader in this build, or one that has no recorder). The caller falls
+    /// back to plain live coaching — the recording is a byproduct, and its
+    /// absence must not cost the session.
+    #[error("recording while coaching is not supported for {sim} in this build")]
+    LiveRecordUnsupported { sim: String },
+
+    /// A share bundle the driver opted into sending could not be delivered.
+    /// Sharing is a favour, so callers degrade to saving the bundle on disk
+    /// rather than failing the whole send — but the reason must still be said.
+    #[error("could not upload the share bundle to {endpoint}: {detail}")]
+    ShareUpload { endpoint: String, detail: String },
 }
 
 /// Every provider's verdict on a capture none of them would open, formatted

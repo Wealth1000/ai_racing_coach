@@ -776,6 +776,103 @@ fn stamp_utc(ms: i64) -> String {
     )
 }
 
+// ======================================================================
+// Recording while coaching
+// ======================================================================
+
+/// A capture written by a *coaching* session — the recorder behind
+/// `SimProvider::live_with_recording`, so a live session leaves the same
+/// file `coach record` would have.
+///
+/// Same writer, same frame, same flush cadence as [`record`], so the
+/// interchange contract holds for coaching captures too: `coach learn-track`
+/// cannot tell them from the C# logger's. The differences are all
+/// lifecycle, and they come from the coaching session owning the loop:
+///
+/// * the file name resolves when the first frame with a published static
+///   page arrives (the track and car that name the file are session facts),
+///   in the caller's directory rather than the working directory —
+/// * the recording ends when coaching ends, wherever [`Drop`] finds it, so
+///   `Drop` finishes the stream: a session capture without its gzip trailer
+///   is a file many readers refuse outright.
+///
+/// A failed write is the *caller's* verdict, never this type's: coaching is
+/// the product and the capture is the byproduct, so the live source decides
+/// whether a failed capture ends coaching (it does not — it says so and
+/// carries on).
+pub(crate) struct LiveRecorder {
+    /// Where the capture lands; the file name inside it is the logger's own.
+    out_dir: PathBuf,
+    /// The capture, from the first frame that named it. `None` until the
+    /// session resolved.
+    writer: Option<LineWriter>,
+    lines_since_flush: usize,
+}
+
+impl LiveRecorder {
+    pub(crate) fn new(out_dir: PathBuf) -> Self {
+        Self {
+            out_dir,
+            writer: None,
+            lines_since_flush: 0,
+        }
+    }
+
+    /// The capture's path, once the session named it — for the connection
+    /// line that tells the driver where their laps are going.
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.writer.as_ref().map(|w| w.path.as_path())
+    }
+
+    /// Write one poll of the pages, in the logger's format.
+    pub(crate) fn on_frame(
+        &mut self,
+        physics: &PhysicsPage,
+        graphics: &GraphicsPage,
+        static_page: &StaticPage,
+        position: [f32; 3],
+        timestamp: i64,
+        sequence: i64,
+    ) -> Result<()> {
+        if self.writer.is_none() {
+            let path = self.out_dir.join(default_path(static_page, false));
+            fs::create_dir_all(&self.out_dir).map_err(|e| CoachError::Io {
+                path: self.out_dir.display().to_string(),
+                source: e,
+            })?;
+            self.writer = Some(LineWriter::create(&path, false)?);
+        }
+        let writer = self.writer.as_mut().expect("created above");
+        writer.write_line(&RecordFrame::from_parts(
+            physics,
+            graphics,
+            static_page,
+            position,
+            timestamp,
+            sequence,
+        ))?;
+        self.lines_since_flush += 1;
+        if self.lines_since_flush >= FLUSH_EVERY {
+            writer.flush()?;
+            self.lines_since_flush = 0;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LiveRecorder {
+    fn drop(&mut self) {
+        // Finish the stream — for gzip this writes the trailer. A coaching
+        // session ends by its own rules (the window closed, the sim quit),
+        // and every one of them must still leave a readable capture.
+        if let Some(writer) = self.writer.take()
+            && let Err(e) = writer.finish()
+        {
+            eprintln!("warning: could not finish the session capture: {e}");
+        }
+    }
+}
+
 /// Days since 1970-01-01 to (year, month, day) — Howard Hinnant's
 /// `civil_from_days`, the standard era-based calendar arithmetic.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -820,6 +917,20 @@ pub fn record<R: PageStore>(opts: &RecordOptions) -> Result<RecordSummary> {
         if opts
             .laps
             .is_some_and(|target| summary.laps_completed >= target as i32)
+        {
+            break;
+        }
+
+        // The caller's stop flag, same role as `--laps` from the other end:
+        // the GUI's record screen has a Stop button rather than a kill signal,
+        // and a stopped recording must still flush and finish its file. Like
+        // the laps check, this sits at the top of the loop so both the waiting
+        // and the polling phases honour it — worst case one attach-retry
+        // (2 s) after the button is pressed.
+        if opts
+            .stop
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
         {
             break;
         }
@@ -951,6 +1062,7 @@ mod tests {
     use crate::sims::assetto_corsa::frame::AcFrame;
     use crate::sims::assetto_corsa::shared_memory::fake::{FakeStore, SCRIPT};
     use crate::sims::assetto_corsa::shared_memory::pages;
+    use crate::telemetry::TelemetrySource;
     use std::io::Read;
 
     const MONZA_CAPTURE: &str =
@@ -1093,6 +1205,7 @@ mod tests {
             out: Some(out.clone()),
             laps: Some(1),
             plain: true,
+            stop: None,
         })
         .unwrap();
 
@@ -1132,9 +1245,103 @@ mod tests {
             out: Some(out.clone()),
             laps: Some(1),
             plain: true,
+            stop: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("i/o error"), "{err}");
         assert_eq!(fs::read_to_string(&out).unwrap(), "precious");
+    }
+
+    /// The GUI's Stop button: a pre-set stop flag ends an open-ended
+    /// recording before any frame is written, cleanly — no file left behind,
+    /// no partial capture pretending to be a session.
+    #[test]
+    fn a_set_stop_flag_ends_the_recording_before_any_frame() {
+        let (physics, graphics, static_page) = pages();
+        SCRIPT.with(|s| {
+            *s.borrow_mut() = crate::sims::assetto_corsa::shared_memory::fake::Script {
+                attach_errors: vec![],
+                pages: vec![(physics, graphics)],
+                static_page,
+                polls: 0,
+            }
+        });
+
+        let dir = std::env::temp_dir().join("coach_record_tests");
+        fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("stopped.ndjson");
+        let _ = fs::remove_file(&out);
+
+        let summary = record::<FakeStore>(&RecordOptions {
+            out: Some(out.clone()),
+            laps: None,
+            plain: true,
+            stop: Some(std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(true),
+            )),
+        })
+        .unwrap();
+
+        assert_eq!(summary.frames, 0, "nothing was written");
+        assert!(summary.path.is_none(), "the file was never named");
+        assert!(!out.exists(), "no partial capture was left behind");
+    }
+
+    /// The recorder behind record-while-coaching: same writer, same frame,
+    /// same name as `record` — proven by reopening the file it left through
+    /// the replay source, the pipeline's own reader. This is the unit half
+    /// of the shared-memory round-trip test (that one proves the wiring;
+    /// this one proves the recorder itself).
+    #[test]
+    fn a_live_recorder_writes_a_replayable_logger_capture() {
+        let dir = std::env::temp_dir().join("coach_record_tests/live_recorder");
+        let _ = fs::remove_dir_all(&dir);
+
+        let (physics, graphics, static_page) = pages();
+        let mut recorder = LiveRecorder::new(dir.clone());
+        assert!(
+            recorder.path().is_none(),
+            "no file until the session names it"
+        );
+        let position = [10.0, 1.0, 20.0];
+        for sequence in 1..=3 {
+            recorder
+                .on_frame(
+                    &physics,
+                    &graphics,
+                    &static_page,
+                    position,
+                    1_788_365_559_824 + sequence,
+                    sequence,
+                )
+                .expect("frames write");
+        }
+        assert!(recorder.path().is_some(), "the first frame named it");
+        drop(recorder); // the session ends: the trailer is written
+
+        let path = fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .expect("one capture")
+            .unwrap()
+            .path();
+        assert!(
+            path.extension().is_some_and(|e| e == "gz"),
+            "gzip by default, like the logger: {}",
+            path.display()
+        );
+
+        let mut replay =
+            crate::sims::assetto_corsa::NdjsonReplaySource::open(&path)
+                .expect("the coaching capture reopens");
+        let mut frames = 0;
+        while replay.next_sample().unwrap().is_some() {
+            frames += 1;
+        }
+        assert_eq!(frames, 3, "every handed frame is in the capture");
+        assert_eq!(
+            replay.session().expect("session").car,
+            "ks_ferrari_sf70h"
+        );
     }
 }

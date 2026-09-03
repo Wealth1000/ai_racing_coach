@@ -71,6 +71,20 @@ pub trait SimProvider: Send + Sync {
             sim: self.name().to_string(),
         })
     }
+
+    /// Coach live *and* record the session's raw telemetry to `out_dir` —
+    /// the record-while-coaching setting. Default: coaching without a
+    /// recorder, reported as [`CoachError::LiveRecordUnsupported`] so the
+    /// caller can warn and fall back to [`Self::live`] rather than losing
+    /// the session over its byproduct.
+    fn live_with_recording(
+        &self,
+        _out_dir: &Path,
+    ) -> Result<Box<dyn TelemetrySource>> {
+        Err(CoachError::LiveRecordUnsupported {
+            sim: self.name().to_string(),
+        })
+    }
 }
 
 /// What `coach record` was asked to do. Sim-agnostic by construction: the
@@ -87,6 +101,11 @@ pub struct RecordOptions {
     pub laps: Option<u32>,
     /// Write plain NDJSON instead of gzip.
     pub plain: bool,
+    /// Stop when this flag is set, checked between polls. `None` never
+    /// stops on demand — the GUI's record screen sets it so its Stop button
+    /// ends a `--laps`-less recording cleanly (flushed and readable) instead
+    /// of killing the process and costing the gzip trailer.
+    pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// What a recording did — the counters a driver checks before trusting the

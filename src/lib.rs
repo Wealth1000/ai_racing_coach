@@ -36,6 +36,7 @@
 
 pub mod audio;
 pub mod coaching;
+pub mod commands;
 pub mod core;
 pub mod features;
 pub mod models;

@@ -36,6 +36,12 @@ thiserror = "2.0"
 # silence (see `audio::sink::TtsSink::connect`). Only a build on a machine
 # without the Linux headers needs `--no-default-features`.
 tts = { version = "0.26", optional = true }
+# The share bundle's transport: a blocking HTTPS POST from the job thread
+# that runs the send. Pure Rust (TLS via rustls), so the Windows release
+# build stays self-contained. Used by the opt-in "Send to author" (the
+# endpoint is compiled in; COACH_SHARE_ENDPOINT overrides it for testing).
+# A failed upload degrades to saving the bundle on disk (see storage::share).
+ureq = "2.10"
 # Decodes the embedded window icon (assets/icon_256.png) into the RGBA buffer
 # egui wants; keeping the decode at run time means one source of truth for the
 # logo instead of a checked-in byte array.
@@ -55,6 +61,10 @@ winresource = "0.1"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Memory",
+    # The GUI-default launch path hides the console a double-clicked exe owns
+    # (main.rs `hide_owned_console`): process-list + window APIs.
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [features]

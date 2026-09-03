@@ -23,6 +23,10 @@ curvature_profile.txt
 # cargo with an overridden target dir); keep it out rather than re-deleting it.
 /coach
 
+# Share bundles the "Send to author" fallback writes when an upload fails
+# (or before one was attempted) — generated donations, never repo content.
+/data/share/
+
 # The C# logger project came with its build artifacts (obj/, publish/, the
 # published exe). Only the sources are worth keeping — the binaries are
 # rebuilt with `dotnet publish` and would bloat the repo permanently.
