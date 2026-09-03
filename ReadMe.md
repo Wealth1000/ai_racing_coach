@@ -229,4 +229,4 @@ extra setup; cross-compiling from Linux additionally needs `mingw64-windres`.
 
 ## License
 
-TBD
+MIT — see [LICENSE](LICENSE).
