@@ -22,7 +22,7 @@ use crate::core::settings::{CAPTURES_DIR, Settings};
 use crate::ui::theme;
 
 /// The home screen of one sim: every command the CLI knows, as buttons,
-/// plus the record-while-coaching setting that governs Coach Live.
+/// plus the settings that govern Coach Live and sharing.
 #[derive(Debug, Clone)]
 pub struct SimHome {
     /// The provider's registry key — how the launcher gets back from here
@@ -30,6 +30,9 @@ pub struct SimHome {
     pub sim_key: String,
     /// What the driver calls the sim, for the heading.
     pub sim_name: String,
+    /// The consent dialog is open: the driver ticked "Share telemetry" and
+    /// has not yet answered. The setting does not change until they do.
+    pub(crate) share_dialog: bool,
 }
 
 impl SimHome {
@@ -37,6 +40,7 @@ impl SimHome {
         Self {
             sim_key: sim_key.to_string(),
             sim_name: sim_name.to_string(),
+            share_dialog: false,
         }
     }
 }
@@ -167,6 +171,25 @@ impl SimHome {
             }
         }
 
+        // Sharing never turns on with a tick alone — the tick asks, the
+        // dialog answers. Turning it *off* needs no ceremony.
+        let mut share = settings.share_telemetry;
+        ui.checkbox(&mut share, "Share telemetry with the author")
+            .on_hover_text(HELP_SHARE);
+        if share != settings.share_telemetry {
+            if share {
+                self.share_dialog = true;
+            } else {
+                settings.share_telemetry = false;
+                if let Err(e) = settings.save() {
+                    ui.colored_label(theme::RED, format!("could not save settings: {e}"));
+                }
+            }
+        }
+        if self.share_dialog {
+            self.render_share_dialog(ui, settings);
+        }
+
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
             if ui.button("‹ All sims").clicked() {
                 action = HomeAction::Back;
@@ -174,6 +197,43 @@ impl SimHome {
         });
 
         action
+    }
+
+    /// The consent dialog: what is sent, why, and what never is — said
+    /// plainly enough that the tick means something. "Share my telemetry"
+    /// is the only way the setting turns on, and it is also when the
+    /// install id is minted: an id for a machine that never shared is a
+    /// file entry for nothing.
+    fn render_share_dialog(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
+        egui::Window::new("Share your telemetry with the author?")
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_max_width(420.0);
+                ui.label(SHARE_WHAT);
+                ui.add_space(6.0);
+                ui.label(SHARE_WHY);
+                ui.add_space(6.0);
+                ui.label(SHARE_NEVER);
+                ui.add_space(6.0);
+                ui.colored_label(theme::MUTED, SHARE_HONESTY);
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Share my telemetry").clicked() {
+                        settings.share_telemetry = true;
+                        if settings.install_id.is_none() {
+                            settings.install_id = Some(Settings::generate_install_id());
+                        }
+                        if let Err(e) = settings.save() {
+                            ui.colored_label(theme::RED, format!("could not save settings: {e}"));
+                        }
+                        self.share_dialog = false;
+                    }
+                    if ui.button("Not now").clicked() {
+                        self.share_dialog = false;
+                    }
+                });
+            });
     }
 }
 
@@ -509,6 +569,9 @@ pub enum ExportOut {
     None,
     Back,
     Run { sessions_dir: PathBuf, out: PathBuf },
+    /// The driver asked to donate the export — the job re-runs the export
+    /// itself (into the bundle), so only the sessions directory is needed.
+    Send { sessions_dir: PathBuf },
 }
 
 impl ExportScreen {
@@ -520,7 +583,10 @@ impl ExportScreen {
         }
     }
 
-    pub fn render(&mut self, ctx: &egui::Context) -> ExportOut {
+    /// `sharing` is whether the driver consented — the Send button only
+    /// exists for them, and its absence says why rather than sitting there
+    /// dead.
+    pub fn render(&mut self, ctx: &egui::Context, sharing: bool) -> ExportOut {
         let mut out = ExportOut::None;
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut back = false;
@@ -550,6 +616,32 @@ impl ExportScreen {
                         sessions_dir: PathBuf::from(self.sessions_dir.trim()),
                         out: PathBuf::from(self.out.trim()),
                     };
+                }
+                // The send is the donation's one explicit act — never
+                // automatic, never hidden behind the export itself.
+                if sharing {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !self.sessions_dir.trim().is_empty(),
+                                egui::Button::new("Send to author"),
+                            )
+                            .clicked()
+                        {
+                            out = ExportOut::Send {
+                                sessions_dir: PathBuf::from(self.sessions_dir.trim()),
+                            };
+                        }
+                        theme::help(ui, HELP_SEND);
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.weak("Send to author");
+                        ui.weak(
+                            "— turn on \"Share telemetry\" on the sim's home screen \
+                             to donate your data",
+                        );
+                    });
                 }
             });
         });
@@ -599,6 +691,36 @@ pub const HELP_RECORD_WHILE_COACHING: &str = "Keeps writing the session's raw \
     telemetry to data/captures while coaching, so you can re-learn the model from it \
     later. Costs a few MB per session.";
 
+pub const HELP_SHARE: &str = "Sends your exported corner-pass data to the coach's \
+    author when you choose Send — nothing is sent automatically. Grows the corpus the \
+    neural coach will train on. The dialog on first tick says exactly what goes.";
+
+pub const HELP_SEND: &str = "Packs the same export the Export button writes into a \
+    donation bundle (session names scrubbed, a small manifest added) and sends it to \
+    the author — or saves it under data/share when no endpoint is configured. Only \
+    available while Share telemetry is on.";
+
+/// The consent dialog's three answers. One paragraph each, no hedging: the
+/// tick has to mean the same thing to the driver as it does to the code.
+pub const SHARE_WHAT: &str = "What gets sent: one CSV row per corner pass — \
+    speeds, braking points, apexes, times — plus a short manifest (the coach's \
+    version, the track and car names, and this install's random id). Nothing is \
+    sent until you press Send to author on the export screen.";
+
+pub const SHARE_WHY: &str = "Why: one driver's laps cannot train the neural \
+    coach. Every donation grows a corpus that trains a coach shipped back to \
+    everyone — the same loop your own sessions already run on, one level up.";
+
+pub const SHARE_NEVER: &str = "What never gets sent: your name, hardware, \
+    settings, or raw captures — the raw telemetry files contain your player \
+    name and stay on this machine. Session names are scrubbed from the data \
+    before it leaves. Turn this off at any time and nothing further is sent.";
+
+pub const SHARE_HONESTY: &str = "One honest caveat: telemetry has no names, but \
+    a driving style is still a fingerprint — the author will be able to \
+    recognise this install's driving across uploads. That is what the random \
+    install id is for.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,10 +738,26 @@ mod tests {
             HELP_EXPORT,
             HELP_LIVE,
             HELP_RECORD_WHILE_COACHING,
+            HELP_SHARE,
+            HELP_SEND,
         ];
         for help in helps {
             assert!(help.len() > 80, "too thin: {help}");
         }
+    }
+
+    /// The consent dialog is the whole consent: each of its three answers
+    /// must be a paragraph that says something, because the tick only means
+    /// what the dialog explains.
+    #[test]
+    fn the_share_dialog_answers_what_why_and_what_not() {
+        for text in [SHARE_WHAT, SHARE_WHY, SHARE_NEVER, SHARE_HONESTY] {
+            assert!(text.len() > 80, "too thin: {text}");
+        }
+        // And they must actually be the three different answers.
+        assert!(SHARE_WHAT.to_lowercase().starts_with("what gets sent"));
+        assert!(SHARE_WHY.to_lowercase().starts_with("why"));
+        assert!(SHARE_NEVER.to_lowercase().starts_with("what never gets sent"));
     }
 
     #[test]

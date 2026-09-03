@@ -105,6 +105,12 @@ pub enum CoachError {
     /// absence must not cost the session.
     #[error("recording while coaching is not supported for {sim} in this build")]
     LiveRecordUnsupported { sim: String },
+
+    /// A share bundle the driver opted into sending could not be delivered.
+    /// Sharing is a favour, so callers degrade to saving the bundle on disk
+    /// rather than failing the whole send — but the reason must still be said.
+    #[error("could not upload the share bundle to {endpoint}: {detail}")]
+    ShareUpload { endpoint: String, detail: String },
 }
 
 /// Every provider's verdict on a capture none of them would open, formatted

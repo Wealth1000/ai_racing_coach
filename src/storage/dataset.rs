@@ -17,7 +17,8 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::core::error::CoachError;
-use crate::core::ids::LapId;
+use crate::core::ids::{LapId, TrackId};
+use crate::core::sample::Sim;
 use crate::features::corner_features::CornerFeatures;
 use crate::features::reference::ReferenceStore;
 use crate::features::track_model::TrackModel;
@@ -55,11 +56,19 @@ const COLUMNS: &[&str] = &[
     "advice_count",
 ];
 
-/// What an export produced, for the CLI's one-line report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What an export produced, for the CLI's one-line report — and the context
+/// a share bundle's manifest needs: which sim, which track, which cars the
+/// rows describe, and how many sessions they came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatasetInfo {
     pub rows: u64,
     pub columns: usize,
+    /// Every session's header said the same sim and track (the fingerprint
+    /// check holds them to one track model); the cars may still differ.
+    pub sim: Sim,
+    pub track: TrackId,
+    pub cars: Vec<String>,
+    pub sessions: u64,
 }
 
 /// Export every pass in every session file to `out` as CSV.
@@ -70,6 +79,47 @@ pub struct DatasetInfo {
 /// match `model`, or the whole export is refused — one mis-joined corner in
 /// a training corpus is worse than no corpus.
 pub fn export_dataset(
+    sessions: &[PathBuf],
+    model: &TrackModel,
+    reference: Option<&ReferenceStore>,
+    out: &Path,
+) -> Result<DatasetInfo, CoachError> {
+    let file = File::create(out).map_err(|e| CoachError::Io {
+        path: out.display().to_string(),
+        source: e,
+    })?;
+    let mut writer = BufWriter::new(file);
+    let info = write_dataset(&mut writer, sessions, model, reference, out)?;
+    writer.flush().map_err(io_err(out))?;
+    Ok(info)
+}
+
+/// [`export_dataset`] into a string instead of a file — the share bundle's
+/// path: the CSV never needs a place on disk, only a place in the bundle.
+pub fn export_dataset_text(
+    sessions: &[PathBuf],
+    model: &TrackModel,
+    reference: Option<&ReferenceStore>,
+) -> Result<(DatasetInfo, String), CoachError> {
+    let mut buffer = Vec::new();
+    let info = write_dataset(
+        &mut buffer,
+        sessions,
+        model,
+        reference,
+        Path::new("dataset"),
+    )?;
+    let csv = String::from_utf8(buffer).map_err(|e| CoachError::Io {
+        path: "dataset".to_string(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.utf8_error()),
+    })?;
+    Ok((info, csv))
+}
+
+/// The export itself, over any writer. Both callers want byte-identical
+/// output, so there is one body and two ways to open it.
+fn write_dataset<W: Write>(
+    writer: &mut W,
     sessions: &[PathBuf],
     model: &TrackModel,
     reference: Option<&ReferenceStore>,
@@ -94,12 +144,6 @@ pub fn export_dataset(
         }
         logs.push((path, log));
     }
-
-    let file = File::create(out).map_err(|e| CoachError::Io {
-        path: out.display().to_string(),
-        source: e,
-    })?;
-    let mut writer = BufWriter::new(file);
 
     writer
         .write_all(&[COLUMNS.join(",").as_bytes(), b"\n"].concat())
@@ -135,7 +179,7 @@ pub fn export_dataset(
         for event in &log.events {
             if let SessionEvent::Pass(f) = event {
                 write_row(
-                    &mut writer,
+                    writer,
                     out,
                     path,
                     f,
@@ -151,10 +195,30 @@ pub fn export_dataset(
         }
     }
 
-    writer.flush().map_err(io_err(out))?;
+    // The context a report (or a share manifest) needs, from the headers the
+    // fingerprint check has already held to one track model. An empty
+    // session list has no context to report — the caller was wrong to ask.
+    if logs.is_empty() {
+        return Err(CoachError::NotEnoughData {
+            action: "export a dataset",
+            detail: "no session files were given".to_string(),
+        });
+    }
+    let mut cars: Vec<String> = Vec::new();
+    for (_, log) in &logs {
+        if !cars.contains(&log.header.car) {
+            cars.push(log.header.car.clone());
+        }
+    }
+    let first = &logs[0].1.header;
+
     Ok(DatasetInfo {
         rows,
         columns: COLUMNS.len(),
+        sim: first.sim,
+        track: first.track.clone(),
+        cars,
+        sessions: logs.len() as u64,
     })
 }
 
@@ -233,7 +297,9 @@ fn fmt(v: f32) -> String {
 }
 
 /// Quote a CSV field if it contains a comma, quote, or newline.
-fn csv_field(s: String) -> String {
+/// `pub(crate)` because the share scrub re-joins rows it split, and the
+/// quoting rule must not drift between writer and re-writer.
+pub(crate) fn csv_field(s: String) -> String {
     if s.contains([',', '"', '\n']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
@@ -420,6 +486,11 @@ mod tests {
         .expect("export");
         assert_eq!(info.rows, passes, "one CSV row per recorded pass");
         assert_eq!(info.columns, 24);
+        // The context half of the report: what the rows describe.
+        assert_eq!(info.sessions, 1);
+        assert_eq!(info.sim, session.sim);
+        assert_eq!(info.track, session.track);
+        assert_eq!(info.cars, vec![session.car.clone()]);
 
         // Read the CSV back and hold it to its own header: line count, field
         // count, and the advice-attribution join.

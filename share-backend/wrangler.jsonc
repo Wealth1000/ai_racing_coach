@@ -1,0 +1,15 @@
+{
+    // Wrangler config for the share receiver. Deploy with `npx wrangler
+    // deploy` (see README.md); the one thing you must edit before that is
+    // the KV namespace id below — `npx wrangler kv namespace create SHARES`
+    // prints it.
+    "name": "coach-share",
+    "main": "src/worker.js",
+    "compatibility_date": "2026-08-01",
+    "kv_namespaces": [
+        {
+            "binding": "SHARES",
+            "id": "PASTE_THE_NAMESPACE_ID_HERE"
+        }
+    ]
+}

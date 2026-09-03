@@ -535,20 +535,27 @@ pub fn record(
     Ok(())
 }
 
-/// `coach export-dataset` — flatten recorded sessions into one CSV row per
-/// corner pass.
-///
-/// The model and personal best are selected the same way `live` selects
-/// them, from the session header's own track and car, so an export joins
-/// exactly the corner set the session was coached against. A session
-/// recorded against a different fingerprint of the model is refused rather
-/// than mis-joined.
-pub fn export_dataset(
+/// What an export (or a share bundle) is built from: the session files, the
+/// one track model they all belong to, and the personal best to join
+/// against — the selection `coach export-dataset` and `coach share-dataset`
+/// both need, so they cannot drift apart.
+struct ExportSelection {
+    sessions: Vec<PathBuf>,
+    model: TrackModel,
+    reference: Option<ReferenceStore>,
+}
+
+/// Pick the sessions, model and personal best for a dataset, the way `live`
+/// picks them: from the first session header's own track and car, so the
+/// join is exactly the corner set the session was coached against. A
+/// session recorded against a different fingerprint of the model is
+/// refused by the exporter rather than mis-joined.
+fn select_for_export(
     sessions_dir: &Path,
-    out: &Path,
     model_dir: &Path,
+    action: &'static str,
     progress: &mut dyn Progress,
-) -> crate::Result<()> {
+) -> crate::Result<ExportSelection> {
     let mut sessions: Vec<PathBuf> = std::fs::read_dir(sessions_dir)
         .map_err(|e| CoachError::Io {
             path: sessions_dir.display().to_string(),
@@ -561,7 +568,7 @@ pub fn export_dataset(
     sessions.sort();
     if sessions.is_empty() {
         return Err(CoachError::NotEnoughData {
-            action: "export a dataset",
+            action,
             detail: format!(
                 "no .ndjson session files in {} — record one with `coach live --record-session`",
                 sessions_dir.display()
@@ -576,7 +583,7 @@ pub fn export_dataset(
     let model_path = TrackModel::path_in(model_dir, first.header.sim, &first.header.track);
     if !model_path.exists() {
         return Err(CoachError::NotEnoughData {
-            action: "export a dataset",
+            action,
             detail: format!(
                 "no model for {} at {} — learn one first with `coach learn-track`",
                 first.header.track,
@@ -604,10 +611,27 @@ pub fn export_dataset(
         Err(_) => None,
     };
 
+    Ok(ExportSelection {
+        sessions,
+        model,
+        reference,
+    })
+}
+
+/// `coach export-dataset` — flatten recorded sessions into one CSV row per
+/// corner pass.
+pub fn export_dataset(
+    sessions_dir: &Path,
+    out: &Path,
+    model_dir: &Path,
+    progress: &mut dyn Progress,
+) -> crate::Result<()> {
+    let selection =
+        select_for_export(sessions_dir, model_dir, "export a dataset", progress)?;
     let info = crate::storage::export_dataset(
-        &sessions,
-        &model,
-        reference.as_ref(),
+        &selection.sessions,
+        &selection.model,
+        selection.reference.as_ref(),
         out,
     )?;
     progress.line(&format!(
@@ -617,6 +641,79 @@ pub fn export_dataset(
         out.display()
     ));
     Ok(())
+}
+
+/// Send the dataset to the author — the GUI's "Send to author", behind the
+/// share-telemetry consent.
+///
+/// The bundle is built from the same export the driver sees (the same
+/// selection, the same fingerprint refusal), with the session names
+/// scrubbed and a manifest added. It is POSTed to the compiled-in
+/// endpoint ([`crate::storage::share::DEFAULT_ENDPOINT`], overridable via
+/// `COACH_SHARE_ENDPOINT` for testing); an upload that fails degrades to
+/// writing the bundle under `data/share/` for the driver to send by hand —
+/// sharing is a favour and must never cost more than the try.
+pub fn share_dataset(
+    sessions_dir: &Path,
+    model_dir: &Path,
+    install_id: &str,
+    progress: &mut dyn Progress,
+) -> crate::Result<()> {
+    let selection = select_for_export(sessions_dir, model_dir, "share a dataset", progress)?;
+    let (info, csv) = crate::storage::export_dataset_text(
+        &selection.sessions,
+        &selection.model,
+        selection.reference.as_ref(),
+    )?;
+    let manifest = crate::storage::share::manifest(&info, install_id);
+    let bundle = crate::storage::share::build_bundle(&csv, manifest)?;
+
+    // The preview is the honesty mechanism: what left the machine is what
+    // the driver can read on the job screen, not a promise in a dialog.
+    progress.line(&format!(
+        "bundle: {} rows from {} session(s) of {} ({}) — coach {}",
+        info.rows,
+        info.sessions,
+        info.track,
+        info.cars.join(", "),
+        env!("CARGO_PKG_VERSION")
+    ));
+    for line in csv.lines().take(3).skip(1) {
+        progress.line(&format!("  {line}"));
+    }
+
+    let endpoint = std::env::var(crate::storage::share::ENDPOINT_ENV)
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| crate::storage::share::DEFAULT_ENDPOINT.to_string());
+    match crate::storage::share::upload(&endpoint, &bundle) {
+        Ok(()) => {
+            progress.line(&format!("sent to {endpoint} — thank you"));
+            Ok(())
+        }
+        Err(e) => {
+            progress.warn(&format!("warning: {e}"));
+            let path = save_offline_bundle(&info, &bundle, progress)?;
+            progress.line(&format!(
+                "kept the bundle to send by hand instead: {}",
+                path.display()
+            ));
+            Ok(())
+        }
+    }
+}
+
+/// Write the bundle to `data/share/` — the endpoint-less path and the
+/// failed-upload fallback, one shape for both.
+fn save_offline_bundle(
+    info: &crate::storage::DatasetInfo,
+    bundle: &[u8],
+    progress: &mut dyn Progress,
+) -> crate::Result<PathBuf> {
+    let dir = Path::new(crate::storage::share::SHARE_DIR);
+    let path = crate::storage::share::save_bundle(dir, &info.track.track, bundle)?;
+    progress.line(&format!("bundle written: {}", path.display()));
+    Ok(path)
 }
 
 /// `coach learn-pb` — record the driver's best pass through each corner as a

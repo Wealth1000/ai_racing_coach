@@ -282,6 +282,31 @@ impl CoachGui {
         ));
     }
 
+    /// Run the donation as a job: export to the bundle, then send it (or
+    /// save it under `data/share` when there is no endpoint). The install
+    /// id is settled here, on the UI thread, because the consent flow
+    /// guarantees one — and a hand-edited settings file that says share
+    /// without one still gets an id rather than sending an empty string.
+    fn run_share_job(&mut self, home: SimHome, sessions_dir: PathBuf) {
+        let model_dir = self.model_dir.clone();
+        let install_id = self.settings.install_id.clone().unwrap_or_else(|| {
+            let id = Settings::generate_install_id();
+            self.settings.install_id = Some(id.clone());
+            if let Err(e) = self.settings.save() {
+                eprintln!("warning: could not save the settings: {e}");
+            }
+            id
+        });
+        self.phase = GuiPhase::Job(JobScreen::spawn(
+            "Send to author".to_string(),
+            home,
+            None,
+            move |p| {
+                commands_lib::share_dataset(&sessions_dir, &model_dir, &install_id, p)
+            },
+        ));
+    }
+
     /// The phase's name — for assertions and failure messages, where a name
     /// reads and a debug dump does not.
     #[cfg(test)]
@@ -520,13 +545,17 @@ impl eframe::App for CoachGui {
                 }
             }
             GuiPhase::Export(screen) => {
-                let out = screen.render(ctx);
+                let sharing = self.settings.share_telemetry;
+                let out = screen.render(ctx, sharing);
                 let home = screen.home.clone();
                 match out {
                     ExportOut::None => {}
                     ExportOut::Back => self.phase = GuiPhase::Home(home),
                     ExportOut::Run { sessions_dir, out } => {
                         self.run_export_job(home, sessions_dir, out);
+                    }
+                    ExportOut::Send { sessions_dir } => {
+                        self.run_share_job(home, sessions_dir);
                     }
                 }
             }
@@ -728,5 +757,24 @@ mod tests {
             panic!("expected the job phase");
         };
         assert!(job.stop.is_some(), "the Stop button needs the flag");
+    }
+
+    /// A donation runs as a job like every other command, carrying the
+    /// window's install id into it. The id is pre-set here so the test
+    /// never writes the real settings file — the minting path itself is
+    /// covered by the settings tests, and it only fires from the consent
+    /// dialog (or the fallback in `run_share_job`, which saves).
+    #[test]
+    fn a_share_from_the_sheet_runs_a_job_with_the_install_id() {
+        let home = SimHome::new("ac", "Assetto Corsa");
+        let mut gui = CoachGui::new(PathBuf::from("data/tracks"), 1.0);
+        gui.settings.install_id = Some("install_test".to_string());
+        gui.run_share_job(home, PathBuf::from("data/sessions"));
+        let GuiPhase::Job(job) = &gui.phase else {
+            panic!("expected the job phase");
+        };
+        assert_eq!(job.title, "Send to author");
+        assert!(job.running());
+        assert!(job.stop.is_none(), "a donation cannot be stopped halfway");
     }
 }

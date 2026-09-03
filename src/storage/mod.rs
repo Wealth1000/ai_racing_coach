@@ -11,11 +11,14 @@
 //! * [`dataset`] flattens a directory of sessions into one CSV row per
 //!   corner pass, joined with the track model and any personal best — the
 //!   corpus the models and the PB store learn from.
+//! * [`share`] packs that corpus into the donation bundle an opted-in
+//!   driver sends the author — the corpus-grower for the neural coach.
 
 pub mod dataset;
 pub mod session;
+pub mod share;
 
-pub use dataset::{DatasetInfo, export_dataset};
+pub use dataset::{DatasetInfo, export_dataset, export_dataset_text};
 pub use session::{
     SessionCounters, SessionEvent, SessionHeader, SessionLog, SessionRecord, SessionWriter,
     read_session,

@@ -1,0 +1,12 @@
+{
+    "name": "coach-share-backend",
+    "private": true,
+    "description": "The share-bundle receiver (Cloudflare Worker + KV). See README.md.",
+    "type": "module",
+    "scripts": {
+        "deploy": "wrangler deploy"
+    },
+    "devDependencies": {
+        "wrangler": "^4.0.0"
+    }
+}

@@ -25,7 +25,10 @@ use crate::core::{CoachError, Result};
 pub const CAPTURES_DIR: &str = "data/captures";
 
 /// The user's persisted choices. See the module docs for the shape's rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Copy` — it owns the install id — so it is passed by reference and
+/// cloned where a copy used to be enough.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// Keep writing the raw telemetry to a capture file while coaching live.
     ///
@@ -37,6 +40,24 @@ pub struct Settings {
     /// might have wanted.
     #[serde(default = "default_record_while_coaching")]
     pub record_while_coaching: bool,
+
+    /// Send the exported dataset to the author when the driver asks, to grow
+    /// the corpus the neural coach will train on.
+    ///
+    /// Defaults to false and only turns on through the consent dialog: the
+    /// toggle must never be on because a default said so. See
+    /// [`crate::storage::share`] for what a share bundle does and does not
+    /// contain.
+    #[serde(default)]
+    pub share_telemetry: bool,
+
+    /// The random id that marks this install's share bundles. Generated at
+    /// the first consent — the author needs to link one stranger's sessions
+    /// across uploads (to split a pooled corpus by session honestly) without
+    /// ever knowing who they are. Absent until the driver opts in: an id for
+    /// a machine that never shared is a file entry for nothing.
+    #[serde(default)]
+    pub install_id: Option<String>,
 }
 
 fn default_record_while_coaching() -> bool {
@@ -47,11 +68,25 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             record_while_coaching: default_record_while_coaching(),
+            share_telemetry: false,
+            install_id: None,
         }
     }
 }
 
 impl Settings {
+    /// A fresh install id, at the moment the driver first consents to
+    /// sharing. Wall-clock nanoseconds plus the process id: unique across
+    /// machines without coordination (the same trick `SessionId` uses, one
+    /// tick finer) and carrying nothing about the machine it came from.
+    pub fn generate_install_id() -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("install_{nanos:x}_{:x}", std::process::id())
+    }
+
     /// Where the one settings file lives. Relative, like every data path in
     /// this crate (`data/tracks`), so a portable install keeps its settings
     /// beside its models.
@@ -121,6 +156,9 @@ mod tests {
     fn a_missing_file_loads_the_defaults_and_recording_is_on() {
         let settings = Settings::load_from(&temp_path("missing/settings.json"));
         assert!(settings.record_while_coaching);
+        // Sharing is a consent decision, never a default.
+        assert!(!settings.share_telemetry);
+        assert_eq!(settings.install_id, None);
     }
 
     #[test]
@@ -128,10 +166,15 @@ mod tests {
         let path = temp_path("round_trip");
         Settings {
             record_while_coaching: false,
+            share_telemetry: true,
+            install_id: Some("install_deadbeef_1a2b".to_string()),
         }
         .save_to(&path)
         .expect("save writes the file");
-        assert!(!Settings::load_from(&path).record_while_coaching);
+        let loaded = Settings::load_from(&path);
+        assert!(!loaded.record_while_coaching);
+        assert!(loaded.share_telemetry);
+        assert_eq!(loaded.install_id.as_deref(), Some("install_deadbeef_1a2b"));
     }
 
     /// The forward-compatibility rule: a file from a newer build (extra
@@ -145,9 +188,19 @@ mod tests {
             "{\"record_while_coaching\": false, \"future_knob\": 3}",
         )
         .unwrap();
-        assert!(!Settings::load_from(&path).record_while_coaching);
+        let loaded = Settings::load_from(&path);
+        assert!(!loaded.record_while_coaching);
+        assert!(!loaded.share_telemetry, "consent never arrives by default");
 
         std::fs::write(&path, "{}").unwrap();
         assert!(Settings::load_from(&path).record_while_coaching);
+    }
+
+    /// Install ids are unique across the same process's two consecutive
+    /// consents (two machines, same moment) — the nanosecond tick is the
+    /// whole point of the scheme.
+    #[test]
+    fn generated_install_ids_do_not_collide() {
+        assert_ne!(Settings::generate_install_id(), Settings::generate_install_id());
     }
 }
