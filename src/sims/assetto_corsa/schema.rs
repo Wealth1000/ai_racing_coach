@@ -17,7 +17,7 @@
 //! a capture cannot pass one and fail the other.
 
 use crate::core::{CoachError, Result};
-use crate::telemetry::frame::AcFrame;
+use crate::sims::assetto_corsa::frame::AcFrame;
 
 /// AC's own heading bound, from the logger's `physics.Heading` check: pi with
 /// about 1% slack, because the page occasionally reports a hair past pi.

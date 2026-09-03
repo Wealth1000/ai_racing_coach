@@ -529,6 +529,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Unix-only: it provokes the error with the filesystem permission bits,
+    /// which Windows does not have.
+    #[cfg(unix)]
     #[test]
     fn an_unwritable_directory_is_an_error_naming_the_path() {
         let dir = temp_dir("readonly");

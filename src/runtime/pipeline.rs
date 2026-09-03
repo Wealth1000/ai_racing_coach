@@ -602,12 +602,12 @@ mod tests {
     use crate::features::corner_features::extract_all;
     use crate::features::lap::{Lap, LapTracker};
     use crate::features::resample::{DEFAULT_STEP_M, resample_lap};
-    use crate::telemetry::NdjsonReplaySource;
+    use crate::sims::assetto_corsa::NdjsonReplaySource;
     use crate::telemetry::source::TelemetrySource;
 
     const MONZA_CAPTURE: &str =
         "ndjson_data/telemetry_ac_monza_ks_ferrari_sf70h_20260902_161237.ndjson.gz";
-    const MONZA_MODEL: &str = "data/tracks/monza.json";
+    const MONZA_MODEL: &str = "data/tracks/ac/monza.json";
 
     /// Split a capture into laps the way `main.rs` does. `None` (test
     /// skipped) when the capture is not present — the golden tests are only
@@ -616,15 +616,17 @@ mod tests {
         let mut source = NdjsonReplaySource::open(path).ok()?;
         let mut tracker: Option<LapTracker> = None;
         let mut laps = Vec::new();
-        while let Ok(Some(frame)) = source.next_frame() {
+        while let Ok(Some(mut sample)) = source.next_sample() {
             let tracker = tracker.get_or_insert_with(|| {
+                // The provider sets the session facts on the first sample,
+                // including the track length its conversion used.
                 let length = source
                     .session()
-                    .map(|s| s.track_length)
-                    .unwrap_or(frame.track_spline_length);
+                    .expect("the first sample carries the session")
+                    .track_length;
                 LapTracker::new(length)
             });
-            if let Some(lap) = tracker.push(&frame) {
+            if let Some(lap) = tracker.push(&mut sample) {
                 laps.push(lap);
             }
         }
@@ -701,17 +703,18 @@ mod tests {
             .map(|c| c.parent_id.unwrap_or(c.id))
             .collect();
 
-        // Live: the same capture, one frame at a time, converted exactly as
-        // the live source thread converts them.
+        // Live: the same capture, one sample at a time, exactly as the live
+        // source thread delivers them (the conversion now lives inside the
+        // AC provider's source).
         let mut source = NdjsonReplaySource::open(MONZA_CAPTURE).expect("reopen capture");
-        let mut frames = Vec::new();
-        while let Some(frame) = source.next_frame().expect("read capture") {
-            frames.push(frame);
+        let mut samples = Vec::new();
+        while let Some(sample) = source.next_sample().expect("read capture") {
+            samples.push(sample);
         }
         let track_length = source
             .session()
-            .map(|s| s.track_length)
-            .unwrap_or(frames[0].track_spline_length);
+            .expect("the first sample carries the session")
+            .track_length;
 
         let config = CoachConfig {
             input: crate::core::InputDevice::Replay {
@@ -731,15 +734,14 @@ mod tests {
         // belongs to the lap that just ended.
         let mut advice_by_lap: Vec<(LapId, Vec<Advice>)> = vec![(LapId(0), Vec::new())];
         let mut tagger = LiveLapTracker::new(track_length);
-        for frame in &frames {
-            let mut sample = Sample::from_ac_frame(frame, track_length);
-            let advice = pipeline.on_sample(&sample);
+        for sample in &mut samples {
+            let advice = pipeline.on_sample(sample);
             advice_by_lap
                 .last_mut()
                 .expect("always at least the current lap")
                 .1
                 .extend(advice);
-            if tagger.push(&mut sample).is_some() {
+            if tagger.push(sample).is_some() {
                 advice_by_lap.push((tagger.current(), Vec::new()));
             }
         }

@@ -30,7 +30,7 @@ use serde::Deserialize;
 ///
 /// Field order follows the logger's own emission order so the two can be diffed
 /// against each other by eye.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AcFrame {
     // ---- Timestamp & position -------------------------------------------
     /// Wall-clock milliseconds (`DateTimeOffset.UtcNow`, `ACProgram.cs:322`).

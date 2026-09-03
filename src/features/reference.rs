@@ -57,7 +57,7 @@
 //! back to the pass that set it is worth an honest caveat about ordinals.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -268,11 +268,13 @@ impl ReferenceStore {
         report
     }
 
-    /// Whether this store may be merged against a model of the given car and
-    /// fingerprint. Anything else must start fresh rather than mix corners
-    /// from different geometries or different cars.
-    pub fn compatible_with(&self, car: &str, model_fingerprint: u64) -> bool {
-        self.provenance.car == car && self.model_fingerprint == model_fingerprint
+    /// Whether this store may be merged against a model of the given sim, car
+    /// and fingerprint. Anything else must start fresh rather than mix corners
+    /// from different geometries, different cars or different sims — the last
+    /// matters because two sims can name the same circuit, and a PB's corner
+    /// ordinals index the *other* sim's learned geometry.
+    pub fn compatible_with(&self, sim: Sim, car: &str, model_fingerprint: u64) -> bool {
+        self.sim == sim && self.provenance.car == car && self.model_fingerprint == model_fingerprint
     }
 
     /// A store with no passes: the stand-in a live session uses when no
@@ -314,6 +316,15 @@ impl ReferenceStore {
     pub fn file_name(track: &TrackId) -> String {
         let base = TrackModel::file_name(track);
         format!("{}_pb.json", base.trim_end_matches(".json"))
+    }
+
+    /// Path a personal best belongs at: `<dir>/<sim-key>/<track>_<layout>_pb.json`,
+    /// beside the model it is pinned to (the same layout
+    /// [`TrackModel::path_in`] produces).
+    pub fn path_in(dir: impl AsRef<Path>, sim: Sim, track: &TrackId) -> PathBuf {
+        dir.as_ref()
+            .join(sim.key())
+            .join(Self::file_name(track))
     }
 
     /// Write the store as JSON, atomically (sibling temp file + rename), as
@@ -734,9 +745,9 @@ pub(crate) mod tests {
             .expect("build");
         let fp = m.fingerprint();
 
-        assert!(store.compatible_with("ks_ferrari_f138", fp));
-        assert!(!store.compatible_with("ks_mazda_mx5_cup", fp), "different car");
-        assert!(!store.compatible_with("ks_ferrari_f138", fp ^ 1), "re-learned model");
+        assert!(store.compatible_with(Sim::AssettoCorsa, "ks_ferrari_f138", fp));
+        assert!(!store.compatible_with(Sim::AssettoCorsa, "ks_mazda_mx5_cup", fp), "different car");
+        assert!(!store.compatible_with(Sim::AssettoCorsa, "ks_ferrari_f138", fp ^ 1), "re-learned model");
     }
 
     #[test]
@@ -772,6 +783,17 @@ pub(crate) mod tests {
         assert_eq!(
             ReferenceStore::file_name(&TrackId::new("magione", "")),
             "magione_pb.json"
+        );
+    }
+
+    #[test]
+    fn path_in_sits_beside_the_track_model_under_the_sim() {
+        // The same layout [`TrackModel::path_in`] produces, so a personal best
+        // and the model it is pinned to can never end up in different
+        // directories.
+        assert_eq!(
+            ReferenceStore::path_in("data/tracks", Sim::AssettoCorsa, &TrackId::new("monza", "")),
+            PathBuf::from("data/tracks/ac/monza_pb.json")
         );
     }
 

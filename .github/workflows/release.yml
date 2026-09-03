@@ -72,6 +72,9 @@ jobs:
             BINARY=coach
           fi
           ARCHIVE="coach-$VERSION-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}"
+          # The README is copied in first because tar's `-C` applies to every
+          # member, so it must live next to the binary when tar runs.
+          cp ReadMe.md target/release/
           if [ "${{ runner.os }}" = "Windows" ]; then
             # bsdtar (on the runner) writes a zip when the name ends in .zip.
             tar -a -cf "$ARCHIVE" -C target/release "$BINARY" ReadMe.md

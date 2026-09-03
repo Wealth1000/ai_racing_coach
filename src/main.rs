@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 use ai_racing_coach::audio::FeedbackSink;
 use ai_racing_coach::coaching::{ControllerMode, DefaultPhraser, advise_pass};
 use ai_racing_coach::core::config::{CoachConfig, InputDevice};
-use ai_racing_coach::core::sample::{Sample, SessionInfo};
+use ai_racing_coach::core::sample::Sample;
 use ai_racing_coach::features::FeatureParams;
 use ai_racing_coach::features::ReferenceStore;
 use ai_racing_coach::features::corner::{self, TrackCorner};
@@ -25,8 +25,8 @@ use ai_racing_coach::features::resample::{self, ResampledLap};
 use ai_racing_coach::features::track_model::{LearnParams, ModelCorner, TrackModel};
 use ai_racing_coach::models::rules::RuleModel;
 use ai_racing_coach::runtime;
-use ai_racing_coach::telemetry::frame::AcFrame;
-use ai_racing_coach::telemetry::{NdjsonReplaySource, Sidecar, TelemetrySource};
+use ai_racing_coach::sims;
+use ai_racing_coach::telemetry::{PrefixedSource, TelemetrySource};
 
 #[derive(Parser)]
 #[command(
@@ -55,6 +55,10 @@ Examples:
 
   coach live --replay capture.ndjson.gz     run the whole pipeline live off a
                                             capture: advice as corners complete
+  coach live                                attach to the running sim instead
+                                            (Windows): wait, announce, coach
+  coach record --laps 3                     capture the running sim's telemetry
+                                            (Windows), in the logger's format
 
 Run `coach help <command>` for the full description of a command."
 )]
@@ -94,6 +98,12 @@ enum Command {
     Inspect {
         /// An `.ndjson` or `.ndjson.gz` capture from the logger.
         capture: PathBuf,
+        /// Which simulator's provider to open the capture, by key (e.g. "ac").
+        /// Omit to offer the file to every registered provider and use the
+        /// first that recognises it.
+        #[arg(long, value_name = "KEY")]
+        sim: Option<String>,
+
 
         /// Distance-grid spacing in metres.
         #[arg(long, default_value_t = resample::DEFAULT_STEP_M, value_parser = positive_metres)]
@@ -120,6 +130,12 @@ enum Command {
     LearnTrack {
         /// An `.ndjson` or `.ndjson.gz` capture from the logger.
         capture: PathBuf,
+        /// Which simulator's provider to open the capture, by key (e.g. "ac").
+        /// Omit to offer the file to every registered provider and use the
+        /// first that recognises it.
+        #[arg(long, value_name = "KEY")]
+        sim: Option<String>,
+
 
         /// Directory to write `<track>_<layout>.json` into.
         #[arg(long, default_value = "data/tracks")]
@@ -145,6 +161,12 @@ enum Command {
     Analyse {
         /// An `.ndjson` or `.ndjson.gz` capture from the logger.
         capture: PathBuf,
+        /// Which simulator's provider to open the capture, by key (e.g. "ac").
+        /// Omit to offer the file to every registered provider and use the
+        /// first that recognises it.
+        #[arg(long, value_name = "KEY")]
+        sim: Option<String>,
+
 
         /// Directory holding `<track>_<layout>.json` models.
         #[arg(long, default_value = "data/tracks")]
@@ -175,6 +197,12 @@ enum Command {
     LearnPb {
         /// An `.ndjson` or `.ndjson.gz` capture from the logger.
         capture: PathBuf,
+        /// Which simulator's provider to open the capture, by key (e.g. "ac").
+        /// Omit to offer the file to every registered provider and use the
+        /// first that recognises it.
+        #[arg(long, value_name = "KEY")]
+        sim: Option<String>,
+
 
         /// Directory holding `<track>_<layout>.json` models.
         #[arg(long, default_value = "data/tracks")]
@@ -191,14 +219,23 @@ enum Command {
 
     /// Run the full pipeline live off a telemetry source.
     ///
-    /// In Batch 12 the only source is a capture replay: the frames stream
-    /// through the same analysis `coach analyse` does after the fact, but one
-    /// at a time, with advice printed the moment each corner pass completes.
-    /// Shared memory (the actual live source) arrives in Batch 16.
+    /// With `--replay`, a capture streams through the same analysis
+    /// `coach analyse` does after the fact, but one at a time, with advice
+    /// printed the moment each corner pass completes. Without it, the coach
+    /// attaches to the running sim (Assetto Corsa's shared-memory pages on
+    /// Windows): it waits for the sim to start, announces the stream when
+    /// telemetry flows, and coaches from the first frame.
     Live {
-        /// Stream this capture through the live pipeline.
+        /// Stream this capture through the live pipeline. Omit to attach to
+        /// the running sim instead.
         #[arg(long)]
-        replay: PathBuf,
+        replay: Option<PathBuf>,
+        /// Which simulator's provider to open the capture, by key (e.g. "ac").
+        /// Omit to offer the file to every registered provider and use the
+        /// first that recognises it.
+        #[arg(long, value_name = "KEY")]
+        sim: Option<String>,
+
 
         /// Directory holding `<track>_<layout>.json` models and
         /// `<track>_<layout>_pb.json` personal bests.
@@ -222,6 +259,34 @@ enum Command {
         record_session: Option<PathBuf>,
     },
 
+    /// Capture telemetry live from the running sim.
+    ///
+    /// The C# logger's job, done by the coach itself — one program on the sim
+    /// machine instead of two. What it writes is the logger's own NDJSON,
+    /// key for key, so `coach inspect`, `learn-track` and everything else
+    /// cannot tell a `coach record` capture from a logger one. Waits for the
+    /// sim to start, then records until Ctrl-C or `--laps` laps.
+    Record {
+        /// Write to this file instead of the logger's default
+        /// `telemetry_ac_<track>_<car>_<stamp>.ndjson.gz` in the working
+        /// directory. Never overwrites an existing file.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+
+        /// Stop after this many laps have been recorded.
+        #[arg(long)]
+        laps: Option<u32>,
+
+        /// Write plain NDJSON instead of gzip.
+        #[arg(long)]
+        plain: bool,
+
+        /// Which simulator's provider to record from, by key (e.g. "ac").
+        /// Omit to let the single registered provider be selected.
+        #[arg(long, value_name = "KEY")]
+        sim: Option<String>,
+    },
+
     /// Export a directory of recorded sessions as one CSV row per corner pass.
     ///
     /// The dataset is the corpus offline analysis learns from: every pass
@@ -242,17 +307,24 @@ enum Command {
         model_dir: PathBuf,
     },
 
-    /// Open the coaching window: connection state, the corner feed, the
-    /// drop counters.
+    /// Open the coaching window: pick a sim, wait for the car, get coached.
     ///
-    /// The GUI is the same live session as `coach live` with a window for
-    /// its consumer: the window drains the advice and event channels on a
-    /// 10 Hz repaint clock, and closing it ends the session cleanly. In
-    /// Batch 15 the only source is a capture replay.
+    /// Without `--replay` the window starts at a sim picker; picking one
+    /// shows a waiting screen until the car is on track, the stream is
+    /// announced in text and voice, and coaching begins. With `--replay`, a
+    /// capture streams through the same live pipeline immediately — the same
+    /// live session as `coach live --replay`, with a window for its consumer.
     Gui {
-        /// Stream this capture through the live pipeline.
+        /// Stream this capture through the live pipeline. Omit to pick a
+        /// sim and attach to it live instead.
         #[arg(long)]
-        replay: PathBuf,
+        replay: Option<PathBuf>,
+        /// Which simulator to use, by key (e.g. "ac"): with `--replay`, the
+        /// provider that opens the capture; without it, the sim the window
+        /// waits for (skipping the picker).
+        #[arg(long, value_name = "KEY")]
+        sim: Option<String>,
+
 
         /// Directory holding `<track>_<layout>.json` models and
         /// `<track>_<layout>_pb.json` personal bests.
@@ -272,34 +344,52 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Inspect {
             capture,
+            sim,
             step,
             all_laps,
-        } => inspect(&capture, step, all_laps),
+        } => inspect(&capture, sim.as_deref(), step, all_laps),
         Command::LearnTrack {
             capture,
+            sim,
             out,
             step,
             dry_run,
-        } => learn_track(&capture, &out, step, dry_run),
+        } => learn_track(&capture, sim.as_deref(), &out, step, dry_run),
         Command::Analyse {
             capture,
+            sim,
             model_dir,
             step,
             all_laps,
-        } => analyse(&capture, &model_dir, step, all_laps),
+        } => analyse(&capture, sim.as_deref(), &model_dir, step, all_laps),
         Command::LearnPb {
             capture,
+            sim,
             model_dir,
             step,
             dry_run,
-        } => learn_pb(&capture, &model_dir, step, dry_run),
+        } => learn_pb(&capture, sim.as_deref(), &model_dir, step, dry_run),
         Command::Live {
             replay,
+            sim,
             model_dir,
             step,
             voice,
             record_session,
-        } => live(&replay, &model_dir, step, voice, record_session.as_deref()),
+        } => live(
+            replay.as_deref(),
+            &model_dir,
+            step,
+            sim.as_deref(),
+            voice,
+            record_session.as_deref(),
+        ),
+        Command::Record {
+            out,
+            laps,
+            plain,
+            sim,
+        } => record(out.as_deref(), laps, plain, sim.as_deref()),
         Command::ExportDataset {
             sessions_dir,
             out,
@@ -307,9 +397,10 @@ fn main() -> ExitCode {
         } => export_dataset(&sessions_dir, &out, &model_dir),
         Command::Gui {
             replay,
+            sim,
             model_dir,
             step,
-        } => gui(&replay, &model_dir, step),
+        } => gui(replay.as_deref(), &model_dir, step, sim.as_deref()),
     };
 
     match result {
@@ -330,40 +421,35 @@ fn main() -> ExitCode {
 
 /// Open a capture and split it into laps.
 ///
-/// Shared by every subcommand: reading frames, honouring the logger's sidecar
-/// verdict and finding lap boundaries is the same work regardless of what is
-/// done with the laps afterwards. The source is returned alongside them because
-/// it owns the [`ai_racing_coach::core::SessionInfo`] and the read statistics.
+/// Shared by every subcommand: reading samples, honouring the provider's
+/// verdict on the capture and finding lap boundaries is the same work
+/// regardless of what is done with the laps afterwards. The source is
+/// returned alongside them because it owns the
+/// [`ai_racing_coach::core::SessionInfo`] and the read statistics.
 ///
-/// Takes no grid spacing: laps here are raw samples at the logger's own rate.
+/// Takes no grid spacing: laps here are raw samples at the source's own rate.
 /// Resampling onto a distance grid happens per-lap in the callers.
-fn read_laps(capture: &Path) -> ai_racing_coach::Result<(NdjsonReplaySource, Vec<Lap>)> {
-    // The logger's own verdict on the capture comes first: if it recorded a
-    // fatal probe failure, the numbers inside are not worth reading.
-    if let Some(sidecar) = Sidecar::for_capture(capture) {
-        sidecar.check(capture)?;
-        for warning in sidecar.warnings() {
-            eprintln!("warning: {warning}");
-        }
-    }
+fn read_laps(
+    capture: &Path,
+    sim: Option<&str>,
+) -> ai_racing_coach::Result<(Box<dyn TelemetrySource>, Vec<Lap>)> {
+    let mut source = sims::open_capture(capture, sim)?;
 
-    let mut source = NdjsonReplaySource::open(capture)?;
-
-    // Track length comes from StaticInfo_TrackSPlineLength, read once. The
-    // previous version estimated it from lap groupings and got 29.9 m for a
-    // 4,286 m circuit.
+    // Track length comes from the session the source discovers on its first
+    // sample. The previous implementation estimated it from lap groupings and
+    // got 29.9 m for a 4,286 m circuit.
     let mut tracker: Option<LapTracker> = None;
     let mut laps: Vec<Lap> = Vec::new();
 
-    while let Some(frame) = source.next_frame()? {
+    while let Some(mut sample) = source.next_sample()? {
         let tracker = tracker.get_or_insert_with(|| {
             let length = source
                 .session()
-                .map(|s| s.track_length)
-                .unwrap_or(frame.track_spline_length);
+                .expect("the first sample carries the session")
+                .track_length;
             LapTracker::new(length)
         });
-        if let Some(lap) = tracker.push(&frame) {
+        if let Some(lap) = tracker.push(&mut sample) {
             laps.push(lap);
         }
     }
@@ -375,12 +461,17 @@ fn read_laps(capture: &Path) -> ai_racing_coach::Result<(NdjsonReplaySource, Vec
     Ok((source, laps))
 }
 
-fn inspect(capture: &Path, step: f32, all_laps: bool) -> ai_racing_coach::Result<()> {
-    let (source, laps) = read_laps(capture)?;
+fn inspect(
+    capture: &Path,
+    sim: Option<&str>,
+    step: f32,
+    all_laps: bool,
+) -> ai_racing_coach::Result<()> {
+    let (source, laps) = read_laps(capture, sim)?;
     println!("{}", source.describe());
 
     println!();
-    print_source_stats(&source);
+    print_source_stats(&*source);
     println!();
     print_lap_table(&laps);
 
@@ -406,11 +497,12 @@ fn inspect(capture: &Path, step: f32, all_laps: bool) -> ai_racing_coach::Result
 /// `coach learn-track` — build the canonical corner set and save it.
 fn learn_track(
     capture: &Path,
+    sim: Option<&str>,
     out_dir: &Path,
     step: f32,
     dry_run: bool,
 ) -> ai_racing_coach::Result<()> {
-    let (source, laps) = read_laps(capture)?;
+    let (source, laps) = read_laps(capture, sim)?;
     println!("{}", source.describe());
 
     let session = source
@@ -425,7 +517,7 @@ fn learn_track(
     println!();
     print_model(&model);
 
-    let path = out_dir.join(TrackModel::file_name(&model.track));
+    let path = TrackModel::path_in(out_dir, model.sim, &model.track);
 
     // The file name keys on track and layout only, so learning the same circuit
     // in a second car lands on this same path. That is not a mistake — a model
@@ -460,6 +552,9 @@ fn learn_track(
         return Ok(());
     }
 
+    // The sim's directory may not exist yet — learning the first model of a
+    // newly added sim is exactly when it does not — but `save` creates parent
+    // directories itself, so there is nothing to do here.
     model.save(&path)?;
     println!("\nWrote {}", path.display());
     Ok(())
@@ -563,78 +658,6 @@ fn print_unanimity(corners: &[ModelCorner], laps: u32) {
     println!("\n  not unanimous: {}", names.join(", "));
 }
 
-/// Load the track model matching a session, or explain that one must be
-/// learned first. Shared by every command that needs canonical corners.
-///
-/// The car-mismatch warning lives here rather than in the callers: every
-/// consumer of a model needs it, and none of them should be able to forget
-/// that per-car boundaries make cross-car numbers approximate.
-fn load_model_for_session(session: &SessionInfo, model_dir: &Path) -> ai_racing_coach::Result<TrackModel> {
-    let path = model_dir.join(TrackModel::file_name(&session.track));
-    if !path.exists() {
-        return Err(ai_racing_coach::CoachError::NotEnoughData {
-            action: "work from a track model",
-            detail: format!(
-                "no model for {} at {} — learn one first with `coach learn-track`",
-                session.track,
-                path.display()
-            ),
-        });
-    }
-    let model = TrackModel::load(&path)?;
-    model.check_track(&session.track, session.track_length)?;
-
-    // Boundaries are per-car (see the track_model module docs). Analysing a
-    // different car is allowed — every number stays self-consistent within
-    // this capture — but the boundaries themselves shift with speed, so it
-    // must not happen silently.
-    if model.provenance.car != session.car {
-        eprintln!(
-            "warning: the model was learned from laps of {}, but this capture is a {} — \
-             corner boundaries shift with speed, so treat them as approximate",
-            model.provenance.car, session.car
-        );
-    }
-
-    Ok(model)
-}
-
-/// Load the personal best matching this session and model, or the empty
-/// stand-in when there is none to use.
-///
-/// Shared by `analyse` and `live` so both compare against the *same*
-/// numbers — which is what makes the advice the two print comparable. An
-/// unusable PB is a warning, not an error: the session runs without
-/// comparison rather than refusing to run at all.
-fn load_reference_for_session(
-    session: &SessionInfo,
-    model: &TrackModel,
-    model_dir: &Path,
-) -> ReferenceStore {
-    let path = model_dir.join(ReferenceStore::file_name(&session.track));
-    if !path.exists() {
-        return ReferenceStore::empty(model);
-    }
-    match ReferenceStore::load(&path) {
-        Ok(existing) if existing.compatible_with(&session.car, model.fingerprint()) => existing,
-        Ok(_) => {
-            eprintln!(
-                "warning: the personal best at {} was recorded for a different car or an \
-                 earlier model of this track — running without comparison",
-                path.display()
-            );
-            ReferenceStore::empty(model)
-        }
-        Err(e) => {
-            eprintln!(
-                "warning: could not read {}: {e} — running without comparison",
-                path.display()
-            );
-            ReferenceStore::empty(model)
-        }
-    }
-}
-
 /// `coach analyse` — per-corner driving numbers against a learned model.
 ///
 /// The model supplies *where* the corners are; extraction reports *what each
@@ -643,11 +666,12 @@ fn load_reference_for_session(
 /// are facts about the spin, not about how the corner is driven.
 fn analyse(
     capture: &Path,
+    sim: Option<&str>,
     model_dir: &Path,
     step: f32,
     all_laps: bool,
 ) -> ai_racing_coach::Result<()> {
-    let (source, laps) = read_laps(capture)?;
+    let (source, laps) = read_laps(capture, sim)?;
     println!("{}", source.describe());
 
     let session = source
@@ -656,8 +680,8 @@ fn analyse(
             path: capture.display().to_string(),
         })?;
 
-    let model = load_model_for_session(session, model_dir)?;
-    let reference = load_reference_for_session(session, &model, model_dir);
+    let model = runtime::load_model_for_session(session, model_dir)?;
+    let reference = runtime::load_reference_for_session(session, &model, model_dir);
 
     println!();
     println!(
@@ -772,14 +796,19 @@ impl From<VoiceChoice> for ai_racing_coach::core::VoiceConfig {
 
 /// `coach live` — the whole pipeline, running as if it were happening now.
 ///
-/// The first frame must be read before anything else: the session it carries
-/// decides which model (and personal best) to load, and the pipeline cannot
-/// be built without them. That frame is then handed back to the stream
-/// through [`PrefixedSource`], so the pipeline still sees every sample
-/// exactly once.
+/// The source is a capture with `--replay`, or the running sim without it.
+/// Either way the first sample must be read before anything else: the session
+/// it carries decides which model (and personal best) to load, and the
+/// pipeline cannot be built without them. That sample is then handed back to
+/// the stream through [`PrefixedSource`], so the pipeline still sees every
+/// sample exactly once.
+///
+/// A live attach announces itself — "Assetto Corsa stream picked up", printed
+/// and spoken — because the driver picked the sim minutes before the stream
+/// existed and deserves to hear that the waiting is over.
 ///
 /// What prints here is the advice the decision layer *delivers* — cooldowns
-/// and repetition suppression apply, on a clock driven by the capture's own
+/// and repetition suppression apply, on a clock driven by the source's own
 /// timestamps so a replay throttles itself exactly as the same drive would
 /// live. `coach analyse` prints the unthrottled set for comparison.
 ///
@@ -788,31 +817,59 @@ impl From<VoiceChoice> for ai_racing_coach::core::VoiceConfig {
 /// (with the drop/skip counters at that moment) through the session writer,
 /// which is a `FeedbackSink` like the voice.
 fn live(
-    capture: &Path,
+    replay: Option<&Path>,
     model_dir: &Path,
     step: f32,
+    sim: Option<&str>,
     voice: VoiceChoice,
     record_session: Option<&Path>,
 ) -> ai_racing_coach::Result<()> {
-    let mut source = NdjsonReplaySource::open(capture)?;
-    let first = source.next_frame()?.ok_or_else(|| {
-        ai_racing_coach::CoachError::EmptyCapture {
-            path: capture.display().to_string(),
+    // The source, and how the config names where its samples come from. A
+    // live attach never fails here: the source starts in its waiting state
+    // and the first `next_sample` below holds until the sim runs, saying why
+    // once per reason — "the sim is not running yet" is the first phase of a
+    // live session, not an error.
+    let (mut source, input, sim_name) = match replay {
+        Some(capture) => (
+            sims::open_capture(capture, sim)?,
+            InputDevice::Replay {
+                capture: capture.to_path_buf(),
+            },
+            None,
+        ),
+        None => {
+            let providers: Vec<&dyn sims::SimProvider> =
+                sims::registry().iter().map(|p| p.as_ref()).collect();
+            let provider = sims::provider_for_live(&providers, sim)?;
+            (provider.live()?, InputDevice::SharedMemory, Some(provider.name()))
         }
+    };
+    let first = source.next_sample()?.ok_or_else(|| match replay {
+        Some(capture) => ai_racing_coach::CoachError::EmptyCapture {
+            path: capture.display().to_string(),
+        },
+        None => ai_racing_coach::CoachError::NotEnoughData {
+            action: "coach a live session",
+            detail: "the sim's stream ended before a single sample".to_string(),
+        },
     })?;
     // Cloned, not borrowed: the source moves into the wiring below, and the
     // session facts outlive it — the recorder quotes them in its header.
     let session = source.session()
-        .ok_or_else(|| {
-            ai_racing_coach::CoachError::EmptyCapture {
+        .ok_or_else(|| match replay {
+            Some(capture) => ai_racing_coach::CoachError::EmptyCapture {
                 path: capture.display().to_string(),
-            }
+            },
+            None => ai_racing_coach::CoachError::NotEnoughData {
+                action: "coach a live session",
+                detail: "the stream carried no session (track and car)".to_string(),
+            },
         })?
         .clone();
 
     println!("{}", source.describe());
 
-    let model = load_model_for_session(&session, model_dir)?;
+    let model = runtime::load_model_for_session(&session, model_dir)?;
     println!();
     println!(
         "Model {} — {} corners learned from {} lap(s) of {}",
@@ -821,13 +878,11 @@ fn live(
         model.lap_count(),
         model.provenance.car,
     );
-    let reference = load_reference_for_session(&session, &model, model_dir);
+    let reference = runtime::load_reference_for_session(&session, &model, model_dir);
 
     let voice_config: ai_racing_coach::core::VoiceConfig = voice.into();
     let config = CoachConfig {
-        input: InputDevice::Replay {
-            capture: capture.to_path_buf(),
-        },
+        input,
         step_m: step,
         models_dir: model_dir.to_path_buf(),
         voice: voice_config,
@@ -838,10 +893,7 @@ fn live(
     let model_fingerprint = model.fingerprint();
     let pipeline = runtime::CoachPipeline::new(model, reference, config);
     let wiring = runtime::spawn(
-        Box::new(PrefixedSource {
-            pending: Some(first),
-            inner: source,
-        }),
+        Box::new(PrefixedSource::new(first, source)),
         pipeline,
     );
 
@@ -889,6 +941,18 @@ fn live(
         }
         None => None,
     };
+
+    // The live pickup announcement. A replay begins the moment it is launched
+    // and its first lines say so; a live attach spent an unknown time
+    // waiting for the sim, and the driver was probably elsewhere — say the
+    // wait is over, in text and in voice.
+    if let Some(sim_name) = sim_name {
+        let announcement = format!("{sim_name} stream picked up");
+        println!("{announcement}");
+        for sink in &mut sinks {
+            sink.say(&announcement);
+        }
+    }
 
     println!();
     let mut spoken = 0u64;
@@ -951,55 +1015,136 @@ fn live(
     Ok(())
 }
 
-/// `coach gui` — the same live session as [`live`], with a window for its
-/// consumer instead of a terminal.
+/// `coach record` — the C# logger's job: capture live telemetry from the
+/// running sim, in the logger's own NDJSON.
 ///
-/// The session wiring is identical (source thread, pipeline thread, the same
-/// model selection from the capture's own session); what differs is who
-/// drains the channels: [`CoachApp`], on a 10 Hz repaint clock, rendering
-/// the advice feed and the counters. Closing the window stops the session
-/// and joins both threads, so the process exits clean.
-fn gui(capture: &Path, model_dir: &Path, step: f32) -> ai_racing_coach::Result<()> {
-    let mut source = NdjsonReplaySource::open(capture)?;
-    let first = source.next_frame()?.ok_or_else(|| {
-        ai_racing_coach::CoachError::EmptyCapture {
-            path: capture.display().to_string(),
-        }
-    })?;
-    let session = source
-        .session()
-        .ok_or_else(|| {
-            ai_racing_coach::CoachError::EmptyCapture {
-                path: capture.display().to_string(),
-            }
-        })?
-        .clone();
-
-    let model = load_model_for_session(&session, model_dir)?;
-    let reference = load_reference_for_session(&session, &model, model_dir);
-
-    let config = CoachConfig {
-        input: InputDevice::Replay {
-            capture: capture.to_path_buf(),
-        },
-        step_m: step,
-        models_dir: model_dir.to_path_buf(),
-        // The GUI says the advice; the terminal does not need to hear it too.
-        voice: Default::default(),
+/// Thin by design — the waiting, polling, skip accounting and lap counting
+/// live in the provider (`sims::assetto_corsa::record`), where a scripted
+/// fake page store can test every path; all this does is pick the provider
+/// and report what the recorder saw.
+fn record(
+    out: Option<&Path>,
+    laps: Option<u32>,
+    plain: bool,
+    sim: Option<&str>,
+) -> ai_racing_coach::Result<()> {
+    let providers: Vec<&dyn sims::SimProvider> =
+        sims::registry().iter().map(|p| p.as_ref()).collect();
+    let provider = sims::provider_for_live(&providers, sim)?;
+    let opts = sims::RecordOptions {
+        out: out.map(Path::to_path_buf),
+        laps,
+        plain,
     };
-    let pipeline = runtime::CoachPipeline::new(model, reference, config);
-    // The connection indicator's text, captured before the source moves
-    // into the wiring — the UI thread never sees the source itself.
-    let source_desc = source.describe();
-    let wiring = runtime::spawn(
-        Box::new(PrefixedSource {
-            pending: Some(first),
-            inner: source,
-        }),
-        pipeline,
-    );
+    let summary = provider.record(&opts)?;
 
-    let app = ai_racing_coach::ui::CoachApp::new(wiring, source_desc);
+    // A recording that never saw the car on track never resolved a file to
+    // write — that is worth saying plainly rather than reporting zero frames
+    // written to nowhere.
+    match &summary.path {
+        Some(path) => println!(
+            "Recorded {} frames ({}) to {}",
+            summary.frames,
+            match summary.laps_completed {
+                0 => "no laps completed".to_string(),
+                n => format!("{n} lap(s)"),
+            },
+            path.display()
+        ),
+        None => println!("No frames recorded — the sim never published a session"),
+    }
+    let skipped = summary.skipped_no_position + summary.skipped_duplicate + summary.skipped_no_session;
+    if skipped > 0 {
+        println!(
+            "Skipped {skipped} polls: {} before the car was on track, {} duplicates, {} without a session",
+            summary.skipped_no_position, summary.skipped_duplicate, summary.skipped_no_session
+        );
+    }
+    Ok(())
+}
+
+/// `coach gui` — the coaching window.
+///
+/// Without `--replay`, the window opens at the sim picker: pick one and it
+/// waits ("Waiting, when you are on track in …") while a background thread
+/// attaches, reads the first sample, loads the model and spawns the
+/// pipeline; the pickup is announced in text and voice and the session
+/// window takes over. With `--replay`, the session exists before the window
+/// does and it starts coaching immediately — the same wiring as `coach live
+/// --replay`, with a window for its consumer.
+///
+/// Either way, closing the window stops the session and joins the threads,
+/// so the process exits clean.
+fn gui(
+    replay: Option<&Path>,
+    model_dir: &Path,
+    step: f32,
+    sim: Option<&str>,
+) -> ai_racing_coach::Result<()> {
+    let app: Box<dyn eframe::App> = match replay {
+        Some(capture) => {
+            let mut source = sims::open_capture(capture, sim)?;
+            let first = source.next_sample()?.ok_or_else(|| {
+                ai_racing_coach::CoachError::EmptyCapture {
+                    path: capture.display().to_string(),
+                }
+            })?;
+            let session = source
+                .session()
+                .ok_or_else(|| {
+                    ai_racing_coach::CoachError::EmptyCapture {
+                        path: capture.display().to_string(),
+                    }
+                })?
+                .clone();
+
+            let model = runtime::load_model_for_session(&session, model_dir)?;
+            let reference = runtime::load_reference_for_session(&session, &model, model_dir);
+
+            let config = CoachConfig {
+                input: InputDevice::Replay {
+                    capture: capture.to_path_buf(),
+                },
+                step_m: step,
+                models_dir: model_dir.to_path_buf(),
+                voice: Default::default(),
+            };
+            let pipeline = runtime::CoachPipeline::new(model, reference, config);
+            // The connection indicator's text, captured before the source
+            // moves into the wiring — the UI thread never sees the source
+            // itself, only what it calls itself.
+            let source_desc = source.describe();
+            let wiring =
+                runtime::spawn(Box::new(PrefixedSource::new(first, source)), pipeline);
+
+            // The GUI speaks the advice; the terminal does not echo it.
+            let voice_skipped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let app = ai_racing_coach::ui::CoachApp::with_sink(
+                wiring,
+                source_desc,
+                Box::new(ai_racing_coach::audio::TtsSink::connect(voice_skipped)),
+            );
+            Box::new(ai_racing_coach::ui::CoachGui::live(app))
+        }
+        None => {
+            let mut gui = ai_racing_coach::ui::CoachGui::new(model_dir.to_path_buf(), step);
+            // `--sim` answers the picker's question before the window opens.
+            if let Some(key) = sim
+                && !gui.wait_for(key)
+            {
+                return Err(ai_racing_coach::CoachError::UnknownSim {
+                    key: key.to_string(),
+                    known: sims::registry()
+                        .iter()
+                        .map(|p| p.key())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                });
+            }
+            Box::new(gui)
+        }
+    };
+
     // The window-manager icon (taskbar/alt-tab on Linux too); the Windows exe
     // additionally carries the same art as an embedded .ico resource via
     // build.rs. A failed decode means no icon, not no window.
@@ -1015,7 +1160,7 @@ fn gui(capture: &Path, model_dir: &Path, step: f32) -> ai_racing_coach::Result<(
             viewport,
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::new(app))),
+        Box::new(move |_cc| Ok(app)),
     )
     .map_err(|e| ai_racing_coach::CoachError::Ui {
         detail: e.to_string(),
@@ -1070,7 +1215,7 @@ fn export_dataset(sessions_dir: &Path, out: &Path, model_dir: &Path) -> ai_racin
     // every session is joined against; the fingerprint check inside the
     // exporter then holds the rest to it.
     let first = ai_racing_coach::storage::read_session(&sessions[0])?;
-    let model_path = model_dir.join(TrackModel::file_name(&first.header.track));
+    let model_path = TrackModel::path_in(model_dir, first.header.sim, &first.header.track);
     if !model_path.exists() {
         return Err(ai_racing_coach::CoachError::NotEnoughData {
             action: "export a dataset",
@@ -1083,9 +1228,13 @@ fn export_dataset(sessions_dir: &Path, out: &Path, model_dir: &Path) -> ai_racin
     }
     let model = TrackModel::load(&model_path)?;
 
-    let pb_path = model_dir.join(ReferenceStore::file_name(&first.header.track));
+    let pb_path = ReferenceStore::path_in(model_dir, first.header.sim, &first.header.track);
     let reference = match ReferenceStore::load(&pb_path) {
-        Ok(store) if store.compatible_with(&first.header.car, model.fingerprint()) => Some(store),
+        Ok(store)
+            if store.compatible_with(first.header.sim, &first.header.car, model.fingerprint()) =>
+        {
+            Some(store)
+        }
         Ok(_) => {
             eprintln!(
                 "warning: the personal best at {} was recorded for a different car or an \
@@ -1110,34 +1259,6 @@ fn export_dataset(sessions_dir: &Path, out: &Path, model_dir: &Path) -> ai_racin
         out.display()
     );
     Ok(())
-}
-
-/// A telemetry source that yields one held frame, then delegates.
-///
-/// [`live`] needs to read the first frame before it can build the pipeline
-/// (the session inside it selects the model); this hands that frame back so
-/// the pipeline's source thread still delivers it — every sample, exactly
-/// once, in order.
-struct PrefixedSource {
-    pending: Option<AcFrame>,
-    inner: NdjsonReplaySource,
-}
-
-impl TelemetrySource for PrefixedSource {
-    fn next_frame(&mut self) -> ai_racing_coach::Result<Option<AcFrame>> {
-        match self.pending.take() {
-            Some(frame) => Ok(Some(frame)),
-            None => self.inner.next_frame(),
-        }
-    }
-
-    fn session(&self) -> Option<&SessionInfo> {
-        self.inner.session()
-    }
-
-    fn describe(&self) -> String {
-        self.inner.describe()
-    }
 }
 
 /// One row per corner: speeds in km/h, distances in metres relative to the
@@ -1193,8 +1314,14 @@ fn print_feature_table(features: &[ai_racing_coach::features::CornerFeatures]) {
 ///
 /// Clean laps only, for the same reason as everywhere else: a spin through
 /// T7 is a fact about the spin, and a personal best is not allowed to be one.
-fn learn_pb(capture: &Path, model_dir: &Path, step: f32, dry_run: bool) -> ai_racing_coach::Result<()> {
-    let (source, laps) = read_laps(capture)?;
+fn learn_pb(
+    capture: &Path,
+    sim: Option<&str>,
+    model_dir: &Path,
+    step: f32,
+    dry_run: bool,
+) -> ai_racing_coach::Result<()> {
+    let (source, laps) = read_laps(capture, sim)?;
     println!("{}", source.describe());
 
     let session = source
@@ -1203,7 +1330,7 @@ fn learn_pb(capture: &Path, model_dir: &Path, step: f32, dry_run: bool) -> ai_ra
             path: capture.display().to_string(),
         })?;
 
-    let model = load_model_for_session(session, model_dir)?;
+    let model = runtime::load_model_for_session(session, model_dir)?;
 
     let mut grids: Vec<(ai_racing_coach::core::ids::LapId, ResampledLap)> = Vec::new();
     let mut unresampled = 0usize;
@@ -1243,12 +1370,12 @@ fn learn_pb(capture: &Path, model_dir: &Path, step: f32, dry_run: bool) -> ai_ra
         });
     }
 
-    let path = model_dir.join(ReferenceStore::file_name(&session.track));
+    let path = ReferenceStore::path_in(model_dir, session.sim, &session.track);
 
     println!();
     let store = if path.exists() {
         let existing = ReferenceStore::load(&path)?;
-        if existing.compatible_with(&session.car, model.fingerprint()) {
+        if existing.compatible_with(session.sim, &session.car, model.fingerprint()) {
             let mut merged = existing;
             let report = merged.absorb(incoming);
             println!("Merging into the existing personal best at {}:", path.display());
@@ -1329,12 +1456,11 @@ fn print_pb_table(store: &ReferenceStore) {
     }
 }
 
-fn print_source_stats(source: &NdjsonReplaySource) {
+fn print_source_stats(source: &dyn TelemetrySource) {
+    let stats = source.stats();
     println!(
         "Frames read     {}\nBlank lines     {}\nUnparseable     {}",
-        source.frames_read(),
-        source.blank_lines(),
-        source.bad_lines()
+        stats.samples, stats.blank_lines, stats.bad_lines
     );
 }
 
@@ -1350,7 +1476,7 @@ fn print_lap_table(laps: &[Lap]) {
         // and the MX5's spin is 4.00.
         let rotation_pi = lap.net_rotation / std::f32::consts::PI;
         let mut note = lap.quality.reason().to_string();
-        if lap.ac_lap_time_ms.is_none() && lap.quality.is_clean() {
+        if lap.sim_lap_time_ms.is_none() && lap.quality.is_clean() {
             note.push_str(" (wall clock)");
         }
         println!(

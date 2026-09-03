@@ -20,8 +20,9 @@ pub enum InputDevice {
     /// Stream a recorded capture through the live pipeline as if it were
     /// happening now.
     Replay { capture: PathBuf },
-    /// Read AC's physics/shared-memory pages directly. Windows-only; the
-    /// reader itself arrives in Batch 16.
+    /// Attach to the running sim's shared-memory telemetry pages through the
+    /// provider registry (the `--sim` flag picks which). Windows-only; AC's
+    /// reader arrives in Batch 16.
     SharedMemory,
 }
 

@@ -149,6 +149,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tts",
+ "windows-sys 0.59.0",
  "winresource",
 ]
 

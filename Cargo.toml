@@ -47,6 +47,16 @@ png = "0.17"
 # unaffected. (Maintained successor of the `winres` crate.)
 winresource = "0.1"
 
+# The AC shared-memory reader (Batch 16): OpenFileMappingW / MapViewOfFile on
+# AC's three pages. Windows-only, so it never enters the Linux build — the
+# cross-platform half of the reader (page structs, frame assembly) lives in
+# `sims::assetto_corsa::shared_memory` and is tested everywhere.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+] }
+
 [features]
 # Speak advice through the OS synthesiser by default; `--no-default-features`
 # builds a binary that cannot speak (header-less CI machines, minimal boxes).

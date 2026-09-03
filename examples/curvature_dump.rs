@@ -7,7 +7,8 @@ use ai_racing_coach::features::corner;
 use ai_racing_coach::features::curvature;
 use ai_racing_coach::features::lap::{Lap, LapTracker};
 use ai_racing_coach::features::resample;
-use ai_racing_coach::telemetry::{NdjsonReplaySource, TelemetrySource};
+use ai_racing_coach::sims::assetto_corsa::NdjsonReplaySource;
+use ai_racing_coach::telemetry::TelemetrySource;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -18,15 +19,17 @@ fn main() {
     let mut source = NdjsonReplaySource::open(std::path::Path::new(capture)).unwrap();
     let mut tracker: Option<LapTracker> = None;
     let mut laps: Vec<Lap> = Vec::new();
-    while let Some(frame) = source.next_frame().unwrap() {
+    while let Some(mut sample) = source.next_sample().unwrap() {
         let t = tracker.get_or_insert_with(|| {
+            // The provider sets the session facts on the first sample,
+            // including the track length its conversion used.
             let length = source
                 .session()
-                .map(|s| s.track_length)
-                .unwrap_or(frame.track_spline_length);
+                .expect("the first sample carries the session")
+                .track_length;
             LapTracker::new(length)
         });
-        if let Some(lap) = t.push(&frame) {
+        if let Some(lap) = t.push(&mut sample) {
             laps.push(lap);
         }
     }

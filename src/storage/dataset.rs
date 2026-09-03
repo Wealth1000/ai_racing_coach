@@ -288,11 +288,11 @@ mod tests {
     fn a_recorded_session_exports_as_one_row_per_pass() {
         use crate::audio::FeedbackSink;
         use crate::coaching::DecisionConfig;
-        use crate::core::{CoachConfig, InputDevice, Sample, SessionId};
+        use crate::core::{CoachConfig, InputDevice, SessionId};
         use crate::features::reference::ReferenceStore;
         use crate::runtime::{CoachPipeline, RuntimeEvent, Stage};
         use crate::storage::session::{SessionCounters, SessionEvent, SessionHeader, SessionWriter};
-        use crate::telemetry::NdjsonReplaySource;
+        use crate::sims::assetto_corsa::NdjsonReplaySource;
         use crate::telemetry::source::TelemetrySource;
         use std::io::BufRead;
         use std::sync::Arc;
@@ -300,7 +300,7 @@ mod tests {
 
         const MONZA_CAPTURE: &str =
             "ndjson_data/telemetry_ac_monza_ks_ferrari_sf70h_20260902_161237.ndjson.gz";
-        const MONZA_MODEL: &str = "data/tracks/monza.json";
+        const MONZA_MODEL: &str = "data/tracks/ac/monza.json";
 
         let Ok(model_for_export) = TrackModel::load(MONZA_MODEL) else {
             eprintln!("skipping: {MONZA_MODEL} not present");
@@ -310,11 +310,11 @@ mod tests {
             eprintln!("skipping: {MONZA_CAPTURE} not present");
             return;
         };
-        // The session facts arrive with the first frame, so read it before
+        // The session facts arrive with the first sample, so read it before
         // asking for them — and hand it back to the stream below so the
         // pipeline still sees every sample exactly once (the same trick as
         // `coach live`'s `PrefixedSource`).
-        let mut first_frame = source.next_frame().expect("read capture");
+        let mut first_sample = source.next_sample().expect("read capture");
         let session = source.session().expect("capture has session info").clone();
 
         // A second copy of the model drives the pipeline (the first is kept
@@ -372,18 +372,15 @@ mod tests {
         };
         let mut passes = 0u64;
         let mut advice_total = 0u64;
-        let mut track_length: Option<f32> = None;
         loop {
-            let frame = match first_frame.take() {
-                Some(f) => f,
-                None => match source.next_frame().expect("read capture") {
-                    Some(f) => f,
+            let sample = match first_sample.take() {
+                Some(s) => s,
+                None => match source.next_sample().expect("read capture") {
+                    Some(s) => s,
                     None => break,
                 },
             };
-            let length = track_length
-                .get_or_insert_with(|| source.session().map(|s| s.track_length).unwrap_or(0.0));
-            let advice = pipeline.on_sample(&Sample::from_ac_frame(&frame, *length));
+            let advice = pipeline.on_sample(&sample);
             for event in pipeline.take_events() {
                 if matches!(event, RuntimeEvent::Pass(_)) {
                     passes += 1;

@@ -492,6 +492,29 @@ impl TrackModel {
         Ok(())
     }
 
+    /// Refuse to coach a session from one sim against a model learned in
+    /// another.
+    ///
+    /// Two sims can name the same circuit ("monza"), so a filename collision
+    /// is a real possibility rather than a paranoid one — and the sim's
+    /// geometry and telemetry conventions differ even when the names match,
+    /// so the model's corners would be wrong with confidence.
+    pub fn check_sim(&self, sim: Sim) -> Result<()> {
+        if self.sim == sim {
+            Ok(())
+        } else {
+            Err(CoachError::BadArtefact {
+                path: Self::file_name(&self.track),
+                artefact: ARTEFACT,
+                detail: format!(
+                    "learned for {}, but the session is {}",
+                    self.sim.name(),
+                    sim.name()
+                ),
+            })
+        }
+    }
+
     /// The corner containing a lap distance, if any.
     ///
     /// Linear: a circuit has tens of corners, and a binary search over that is
@@ -575,10 +598,14 @@ impl TrackModel {
         }
     }
 
-    /// Path this model belongs at inside a directory of models.
-    pub fn path_in(dir: impl AsRef<Path>) -> impl Fn(&TrackId) -> PathBuf {
-        let dir = dir.as_ref().to_path_buf();
-        move |track| dir.join(Self::file_name(track))
+    /// Path a model belongs at: `<dir>/<sim-key>/<track>_<layout>.json`.
+    ///
+    /// The sim scope is not cosmetic: two sims can name the same circuit, and
+    /// a model's corners are only true in the sim that produced the telemetry
+    /// (see [`Self::check_sim`]). One source of truth for the layout means the
+    /// load-time check and the directory layout can never drift apart.
+    pub fn path_in(dir: impl AsRef<Path>, sim: Sim, track: &TrackId) -> PathBuf {
+        dir.as_ref().join(sim.key()).join(Self::file_name(track))
     }
 
     /// Write the model as JSON, creating parent directories as needed.
@@ -1103,6 +1130,7 @@ mod tests {
                     live: true,
                     surface_grip: 1.0,
                     lap_time_ms: (d * 33.0) as i32,
+            last_lap_time_ms: 0,
                 });
             }
         }
@@ -1115,7 +1143,7 @@ mod tests {
             net_rotation: std::f32::consts::TAU,
             off_track_frames: 0,
             not_live_frames: 0,
-            ac_lap_time_ms: Some((d * 33.0) as i32),
+            sim_lap_time_ms: Some((d * 33.0) as i32),
             wall_duration_ms: (d * 33.0) as i64,
         }
     }
@@ -1149,8 +1177,7 @@ mod tests {
             // has straight to sit on past the last corner.
             track_length: 1500.0,
             sector_count: 3,
-            ac_version: "1.16.3".to_string(),
-            sm_version: "1.7".to_string(),
+            sim_version: "AC 1.16.3, SM 1.7".to_string(),
         }
     }
 
@@ -1755,5 +1782,63 @@ mod tests {
         let err = TrackModel::load(&path).expect_err("malformed");
         let _ = fs::remove_file(&path);
         assert!(matches!(err, CoachError::BadArtefact { .. }), "got {err}");
+    }
+
+    #[test]
+    fn path_in_scopes_the_model_under_its_sim() {
+        // The layout — <dir>/<sim-key>/<track>_<layout>.json — is what keeps
+        // two sims' models of the same-named circuit from colliding, so it is
+        // pinned here in one place rather than asserted incidentally wherever
+        // the CLI builds a path.
+        assert_eq!(
+            TrackModel::path_in("data/tracks", Sim::AssettoCorsa, &TrackId::new("monza", "")),
+            PathBuf::from("data/tracks/ac/monza.json")
+        );
+        assert_eq!(
+            TrackModel::path_in(
+                "data/tracks",
+                Sim::AssettoCorsa,
+                &TrackId::new("ks_barcelona", "layout_gp")
+            ),
+            PathBuf::from("data/tracks/ac/ks_barcelona_layout_gp.json")
+        );
+    }
+
+    #[test]
+    fn a_model_from_an_unregistered_sim_is_refused_loudly() {
+        let model = learned();
+        let dir = std::env::temp_dir().join("coach_track_model_foreign_sim");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("foreign.json");
+        model.save(&path).expect("save a valid model first");
+
+        // Hand it the file a second sim would have written: same JSON, foreign
+        // sim. `Sim` is a closed enum, so this fails at the door — the
+        // unknown-variant error must name the sim, or the operator cannot tell
+        // a stale model from a corrupt one.
+        let json = fs::read_to_string(&path).expect("read back");
+        let foreign = json.replace("\"sim\": \"AssettoCorsa\"", "\"sim\": \"ams2\"");
+        assert_ne!(
+            json, foreign,
+            "the fixture must actually rewrite the sim field"
+        );
+        fs::write(&path, foreign).expect("write the foreign model");
+
+        let err = TrackModel::load(&path).expect_err("foreign sim");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(matches!(err, CoachError::BadArtefact { .. }), "got {err}");
+        assert!(
+            err.to_string().contains("ams2"),
+            "the error must name the sim it refused: {err}"
+        );
+    }
+
+    #[test]
+    fn check_sim_accepts_the_sim_the_model_was_learned_for() {
+        let model = learned();
+        model.check_sim(session().sim).expect("same sim");
+        // The mismatch branch needs a second registered sim to be
+        // constructable; until one exists, the unknown-variant refusal above
+        // is the only foreign model that can reach a load.
     }
 }

@@ -5,6 +5,6 @@ pub mod math;
 pub mod sample;
 
 pub use config::{CoachConfig, InputDevice, VoiceBackend, VoiceConfig};
-pub use error::{CoachError, Result};
+pub use error::{CaptureAttempts, CoachError, Result};
 pub use ids::{CornerId, LapId, SessionId, TrackId};
 pub use sample::{Sample, SessionInfo, Sim};

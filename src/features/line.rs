@@ -283,6 +283,7 @@ mod tests {
             live: true,
             surface_grip: 1.0,
             lap_time_ms: distance as i32,
+            last_lap_time_ms: 0,
         }
     }
 

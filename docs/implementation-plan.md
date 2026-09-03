@@ -236,7 +236,7 @@ reports *where* the two laps diverged most, which the DP discards.
                          │    resample → lap split → line medoid →           │
                          │    curvature → corner detect → TrackModel JSON    │
                          └───────────────────────┬───────────────────────────┘
-                                                 │ data/tracks/<track>.json
+                                                 │ data/tracks/<sim>/<track>.json
                                                  ▼
   ┌──────────────┐   TelemetryFrame   ┌──────────────────────────────────────┐
   │ TelemetrySource ├─────────────────►│            CoachPipeline             │

@@ -208,6 +208,7 @@ mod tests {
                     live: true,
                     surface_grip: 1.0,
                     lap_time_ms: i as i32 * 30,
+            last_lap_time_ms: 0,
                 }
             })
             .collect()

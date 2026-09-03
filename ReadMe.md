@@ -28,7 +28,7 @@ Everything runs on your machine. No network, no accounts, no cloud.
 ## How it works
 
 ```text
- .ndjson capture ─▶ telemetry (strict AC schema) ─▶ Sample (canonical units)
+ .ndjson capture ─▶ sim provider (AC) ─▶ Sample (canonical units)
                  ─▶ lap tracking ─▶ 1 m distance grid ─▶ curvature
                  ─▶ corner model (learned) ─▶ per-pass features
                  ─▶ rule model ─▶ phraser ─▶ decision engine ─▶ voice / GUI
@@ -39,21 +39,33 @@ out, no stage buffering a whole lap. Replay and live share this one code path
 — a replay is the same session, minus the sim — and the streaming path is
 golden-tested to agree with the offline analysis on real captures.
 
+Simulators plug in below the pipeline: each one is a *provider*
+(`src/sims/<name>/`) that owns its capture format, its unit conversions and —
+eventually — its live telemetry reader, and hands the pipeline the canonical
+`Sample` stream. The registry in `src/sims/mod.rs` decides which provider a
+capture belongs to (a file no provider recognises is refused loudly, with
+every provider's reason), and `--sim <key>` skips the guessing. Adding a sim
+means one new module and one registry entry; the pipeline, coaching, storage
+and UI are untouched.
+
 ## Status
 
-**Supported simulator: Assetto Corsa only.** Captures from anything else are
-refused with an explicit schema error rather than mis-parsed — the telemetry
-reader is deliberately strict. No other simulator is supported at this time.
+**Supported simulator: Assetto Corsa** — the only provider registered today.
+Captures from anything else are refused with an explicit schema error rather
+than mis-parsed — the provider is deliberately strict about what it claims.
+The architecture is modular (see above): further sims arrive as new
+providers, without touching the pipeline.
 
 | Capability | State |
 |---|---|
 | Capture inspection, track learning, offline analysis, personal bests | done |
 | Live coaching from a capture replay (Linux/Windows), voice, GUI, session recording, dataset export | done |
-| Reading AC's shared memory directly on Windows (`coach record`, `coach live` without a capture) | in development |
+| Reading AC's shared memory directly on Windows (`coach record`, `coach live`/`coach gui` without a capture) | done |
 
-Until the Windows shared-memory reader lands, captures are made with the
-bundled C# logger (below) and the coach runs against them — live, at full
-pipeline speed.
+Captures can be made two ways on Windows: `coach record` (the coach itself
+reading AC's shared memory, writing the same NDJSON the C# logger writes) or
+the bundled C# logger (below). Either file feeds everything else — live, at
+full pipeline speed.
 
 ## Getting started
 
@@ -64,25 +76,47 @@ Requires Rust 1.85+ (stable) and an Assetto Corsa capture in `.ndjson` or
 $ cargo build --release
 
 $ coach inspect capture.ndjson.gz        # what is in this capture?
-$ coach learn-track capture.ndjson.gz    # learn data/tracks/<track>.json
+$ coach learn-track capture.ndjson.gz    # learn data/tracks/ac/<track>.json
 $ coach learn-pb capture.ndjson.gz       # your best pass per corner
 $ coach analyse capture.ndjson.gz        # corner-by-corner table, offline
 $ coach live --replay capture.ndjson.gz  # live coaching over the capture
 ```
 
-`coach gui --replay capture.ndjson.gz` opens the coaching window instead of
-printing to the terminal.
+On Windows, with Assetto Corsa running, the coach can also take its telemetry
+live from the sim itself — no capture file needed:
+
+```console
+$ coach record                           # write a capture straight from the sim
+$ coach live                             # wait for the sim, then coach live
+$ coach gui                              # pick the sim in the window, then coach
+```
+
+`coach live` waits for the sim to start (saying why, once per reason),
+announces "Assetto Corsa stream picked up" when telemetry flows — printed and
+spoken — and coaches from the first frame. `coach gui` opens at a sim picker:
+pick one, and the window waits ("Waiting, when you are on track in Assetto
+Corsa, the results will show here.") until the car is placed, then announces
+the pickup and coaches. `coach gui --replay capture.ndjson.gz` skips all that
+and streams the capture through the same window.
 
 Useful flags: `--all-laps` (inspect/analyse: every clean lap, not just the
 fastest), `--step <m>` (distance-grid spacing), `--model-dir` (where models
-live, default `data/tracks`), `--dry-run` (learn without writing).
+live, default `data/tracks`), `--sim <key>` (force a provider instead of
+probing — e.g. `--sim ac`), `--dry-run` (learn without writing). For
+`coach record`: `--out FILE` (never overwrites an existing capture),
+`--laps N` (stop after N laps), `--plain` (uncompressed NDJSON).
 
 ## Recording telemetry (Windows)
 
-Run `AcTelemetryLogger` (in `Logger Programs/AcTelemetryLogger`) alongside
-Assetto Corsa. It attaches to AC's shared-memory pages and writes an NDJSON
-capture — plain or gzipped on `.gz`. Copy the capture to the machine running
-the coach, or run both on the same box.
+The coach itself can record: `coach record` attaches to AC's shared-memory
+pages and writes an NDJSON capture — the same format, key for key, as the
+bundled C# logger, so nothing downstream can tell them apart. `--laps N`
+gives a clean stop; without it, Ctrl-C ends the recording (the last unflushed
+line and the gzip trailer are lost, everything before is readable).
+
+Alternatively, run `AcTelemetryLogger` (in `Logger Programs/AcTelemetryLogger`)
+alongside Assetto Corsa. It writes the same captures; it also writes a
+`.meta.json` sidecar with its own probe verdicts, which `coach` reads first.
 
 ## Voice output
 
@@ -149,22 +183,30 @@ corner number 7 means a place only within the model that numbered it.
 
 ```text
 data/
-├── tracks/      <track>_<layout>.json — the learned corner model
-│                <track>_<layout>_pb.json — your best pass per corner
+├── tracks/
+│   └── ac/       one directory per simulator (the provider's key)
+│       ├── <track>_<layout>.json — the learned corner model
+│       └── <track>_<layout>_pb.json — your best pass per corner
 └── sessions/    <session-id>.ndjson — one file per live session
 ```
+
+The per-sim directory is not cosmetic: two simulators can name the same
+circuit, and a model's corners are only true in the sim whose telemetry
+produced them — a model is refused at load time if its sim does not match
+the session's.
 
 ## Development
 
 ```console
-$ cargo test      # 199 tests, no hardware or display required
+$ cargo test      # 247 tests, no hardware or display required
 ```
 
 The voice and GUI layers are abstracted behind small traits (`Speech`,
-`FeedbackSink`, the render-free row model), so everything is testable on a
-headless box. `docs/implementation-plan.md` records the design rationale and
-the batch plan; the struct layouts in `Logger Programs/AcTelemetryLogger`
-are the reference for the Windows shared-memory reader.
+`FeedbackSink`, the render-free row model and phase machine), so everything
+is testable on a headless box. `docs/implementation-plan.md` records the
+design rationale and the batch plan; the struct layouts in `Logger
+Programs/AcTelemetryLogger` are the reference the Windows shared-memory
+reader was built against.
 
 ### Assets
 
