@@ -22,3 +22,13 @@ curvature_profile.txt
 # A stray copy of the built binary once landed in the repo root (someone ran
 # cargo with an overridden target dir); keep it out rather than re-deleting it.
 /coach
+
+# The C# logger project came with its build artifacts (obj/, publish/, the
+# published exe). Only the sources are worth keeping — the binaries are
+# rebuilt with `dotnet publish` and would bloat the repo permanently.
+Logger Programs/**/obj/
+Logger Programs/**/bin/
+Logger Programs/**/publish/
+Logger Programs/**/*.exe
+Logger Programs/**/*.pdb
+Logger Programs/**/*.orig-backup

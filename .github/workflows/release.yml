@@ -1,0 +1,122 @@
+# Release pipeline.
+#
+# Pushing to the `release` branch builds the coach for Linux and Windows,
+# runs the full test suite on both, packages the binaries, and publishes
+# them as a GitHub release tagged `v<version>` (version read from
+# Cargo.toml — bump it there to cut a new release). Re-pushing the branch
+# with the same version overwrites the existing release's assets rather
+# than duplicating them.
+
+name: release
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # required to create the release and its tag
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build and test (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # a failure on one platform should not cancel the other
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # The voice feature (default on) links against libspeechd, and the GUI
+      # links against X11/Wayland/GL at build time even though no test opens
+      # a window. Windows needs nothing: SAPI is in the OS and rc.exe (for
+      # the exe icon in build.rs) ships with the runner's toolchain.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libspeechd-dev \
+            libx11-dev libxi-dev libxcursor-dev libxrandr-dev \
+            libxinerama-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked --quiet
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      # Package the binary together with the README so the archives are
+      # self-explanatory. Windows runners carry bsdtar, which writes a zip
+      # when the archive name ends in .zip — one packager for both platforms.
+      - name: Package
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BINARY=coach.exe
+          else
+            BINARY=coach
+          fi
+          ARCHIVE="coach-$VERSION-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # bsdtar (on the runner) writes a zip when the name ends in .zip.
+            tar -a -cf "$ARCHIVE" -C target/release "$BINARY" ReadMe.md
+          else
+            tar -czf "$ARCHIVE" -C target/release "$BINARY" ReadMe.md
+          fi
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Same version re-pushed: replace the assets, keep the release.
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --target "$GITHUB_SHA" \
+              --title "coach $VERSION" \
+              --generate-notes
+          fi

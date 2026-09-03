@@ -1000,12 +1000,19 @@ fn gui(capture: &Path, model_dir: &Path, step: f32) -> ai_racing_coach::Result<(
     );
 
     let app = ai_racing_coach::ui::CoachApp::new(wiring, source_desc);
+    // The window-manager icon (taskbar/alt-tab on Linux too); the Windows exe
+    // additionally carries the same art as an embedded .ico resource via
+    // build.rs. A failed decode means no icon, not no window.
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([720.0, 480.0])
+        .with_min_inner_size([480.0, 240.0]);
+    if let Some(icon) = ai_racing_coach::ui::window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     eframe::run_native(
         "AI Racing Coach",
         eframe::NativeOptions {
-            viewport: eframe::egui::ViewportBuilder::default()
-                .with_inner_size([720.0, 480.0])
-                .with_min_inner_size([480.0, 240.0]),
+            viewport,
             ..Default::default()
         },
         Box::new(|_cc| Ok(Box::new(app))),

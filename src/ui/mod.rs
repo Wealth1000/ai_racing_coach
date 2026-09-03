@@ -7,5 +7,7 @@
 //! are plain data logic, and CI has no display to render on.
 
 pub mod app;
+pub mod icon;
 
 pub use app::CoachApp;
+pub use icon::window_icon;

@@ -28,16 +28,27 @@ flate2 = "1.1.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0"
-# The voice sink's platform synthesiser. On Linux it speaks through
+# The voice sink's platform synthesiser. On Windows this is SAPI — in the
+# OS, no system packages needed. On Linux it speaks through
 # speech-dispatcher: `speech-dispatcher-devel` (headers) at build time and
-# `speech-dispatcherd` at run time. The dependency is optional because those
-# headers are a system package — CI and header-less machines build without
-# `voice`, and `coach live --voice tts` degrades to counted silence exactly
-# as it does on a machine with no speech daemon. Build with
-# `--features voice` once the headers are installed to get real audio.
+# `speech-dispatcherd` + a voice module at run time. On for every default
+# build: a missing backend at run time degrades to a warning and counted
+# silence (see `audio::sink::TtsSink::connect`). Only a build on a machine
+# without the Linux headers needs `--no-default-features`.
 tts = { version = "0.26", optional = true }
+# Decodes the embedded window icon (assets/icon_256.png) into the RGBA buffer
+# egui wants; keeping the decode at run time means one source of truth for the
+# logo instead of a checked-in byte array.
+png = "0.17"
+
+[build-dependencies]
+# Embeds assets/logo.ico into the Windows executable so Explorer and the taskbar
+# show the logo. Compiles no resource on other targets, so the Linux build is
+# unaffected. (Maintained successor of the `winres` crate.)
+winresource = "0.1"
 
 [features]
-default = []
-# Speak advice through the OS synthesiser (see the `tts` dependency above).
+# Speak advice through the OS synthesiser by default; `--no-default-features`
+# builds a binary that cannot speak (header-less CI machines, minimal boxes).
+default = ["voice"]
 voice = ["dep:tts"]
