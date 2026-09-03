@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "sim": "AssettoCorsa",
   "track": {
     "track": "monza",
@@ -9,95 +9,485 @@
   "corners": [
     {
       "id": 0,
-      "start_m": 903.0,
-      "end_m": 1020.0,
-      "apex_m": 969.0,
-      "heading_apex_m": 970.0,
+      "start_m": 575.0,
+      "end_m": 590.0,
+      "apex_m": 589.0,
+      "heading_apex_m": 581.0,
       "direction": "Left",
-      "turn_angle": -0.40056682,
-      "peak_curvature": 0.045183625,
-      "support": 4
+      "turn_angle": -0.044148922,
+      "peak_curvature": 0.0031236152,
+      "support": 6,
+      "parent_id": null,
+      "match_fraction": 0.75,
+      "decision_events": []
     },
     {
       "id": 1,
-      "start_m": 1286.0,
-      "end_m": 1324.0,
-      "apex_m": 1304.0,
-      "heading_apex_m": 1299.0,
+      "start_m": 900.0,
+      "end_m": 949.0,
+      "apex_m": 931.0,
+      "heading_apex_m": 932.0,
       "direction": "Right",
-      "turn_angle": 0.2004435,
-      "peak_curvature": 0.005836337,
-      "support": 2
+      "turn_angle": 1.3572187,
+      "peak_curvature": 0.046349674,
+      "support": 8,
+      "parent_id": null,
+      "match_fraction": 0.8888889,
+      "decision_events": [
+        {
+          "kind": "ThrottleDip",
+          "distance_m": 782.0,
+          "support": 8
+        },
+        {
+          "kind": "BrakeOnset",
+          "distance_m": 803.0,
+          "support": 9
+        },
+        {
+          "kind": "BrakeRelease",
+          "distance_m": 921.0,
+          "support": 9
+        }
+      ]
     },
     {
       "id": 2,
-      "start_m": 2111.0,
-      "end_m": 2226.0,
-      "apex_m": 2146.0,
-      "heading_apex_m": 2146.0,
-      "direction": "Left",
-      "turn_angle": -0.0717231,
-      "peak_curvature": 0.03124744,
-      "support": 4
+      "start_m": 949.0,
+      "end_m": 999.0,
+      "apex_m": 949.0,
+      "heading_apex_m": 949.0,
+      "direction": "Right",
+      "turn_angle": 0.26187384,
+      "peak_curvature": 0.0034522302,
+      "support": 7,
+      "parent_id": null,
+      "match_fraction": 0.875,
+      "decision_events": [
+        {
+          "kind": "ThrottlePickup",
+          "distance_m": 980.0,
+          "support": 8
+        }
+      ]
     },
     {
       "id": 3,
-      "start_m": 2471.0,
-      "end_m": 2644.0,
-      "apex_m": 2499.0,
-      "heading_apex_m": 2498.0,
-      "direction": "Right",
-      "turn_angle": 1.7762486,
-      "peak_curvature": 0.013944108,
-      "support": 4
+      "start_m": 999.0,
+      "end_m": 1019.0,
+      "apex_m": 999.0,
+      "heading_apex_m": 999.0,
+      "direction": "Left",
+      "turn_angle": -0.06991005,
+      "peak_curvature": 0.0024636288,
+      "support": 6,
+      "parent_id": null,
+      "match_fraction": 1.0,
+      "decision_events": [
+        {
+          "kind": "ThrottlePickup",
+          "distance_m": 1057.5,
+          "support": 9
+        }
+      ]
     },
     {
       "id": 4,
-      "start_m": 2824.0,
-      "end_m": 2932.0,
-      "apex_m": 2860.0,
-      "heading_apex_m": 2861.0,
+      "start_m": 1260.0,
+      "end_m": 1599.0,
+      "apex_m": 1320.0,
+      "heading_apex_m": 1314.0,
       "direction": "Right",
-      "turn_angle": 1.1835263,
-      "peak_curvature": 0.018533466,
-      "support": 4
+      "turn_angle": 1.0529937,
+      "peak_curvature": 0.0051694224,
+      "support": 7,
+      "parent_id": null,
+      "match_fraction": 0.875,
+      "decision_events": [
+        {
+          "kind": "ThrottleDip",
+          "distance_m": 1102.5,
+          "support": 9
+        },
+        {
+          "kind": "ThrottlePickup",
+          "distance_m": 1555.0,
+          "support": 7
+        }
+      ]
     },
     {
       "id": 5,
-      "start_m": 3899.0,
-      "end_m": 3961.0,
-      "apex_m": 3917.0,
-      "heading_apex_m": 3941.0,
-      "direction": "Left",
-      "turn_angle": -0.8083966,
-      "peak_curvature": 0.016738087,
-      "support": 4
+      "start_m": 1621.0,
+      "end_m": 1801.5,
+      "apex_m": 1682.5,
+      "heading_apex_m": 1670.5,
+      "direction": "Right",
+      "turn_angle": 0.38684964,
+      "peak_curvature": 0.0044989497,
+      "support": 9,
+      "parent_id": null,
+      "match_fraction": 1.0,
+      "decision_events": []
     },
     {
       "id": 6,
-      "start_m": 5082.0,
-      "end_m": 5465.0,
-      "apex_m": 5161.0,
-      "heading_apex_m": 5137.0,
+      "start_m": 1923.0,
+      "end_m": 1939.0,
+      "apex_m": 1935.0,
+      "heading_apex_m": 1932.0,
+      "direction": "Left",
+      "turn_angle": -0.04790795,
+      "peak_curvature": 0.0022986252,
+      "support": 8,
+      "parent_id": null,
+      "match_fraction": 1.0,
+      "decision_events": []
+    },
+    {
+      "id": 7,
+      "start_m": 2159.0,
+      "end_m": 2230.0,
+      "apex_m": 2179.0,
+      "heading_apex_m": 2180.0,
       "direction": "Right",
-      "turn_angle": 2.9080036,
-      "peak_curvature": 0.013694443,
-      "support": 4
+      "turn_angle": 0.8927901,
+      "peak_curvature": 0.023795294,
+      "support": 8,
+      "parent_id": null,
+      "match_fraction": 0.8888889,
+      "decision_events": [
+        {
+          "kind": "BrakeOnset",
+          "distance_m": 1996.0,
+          "support": 9
+        },
+        {
+          "kind": "ThrottleDip",
+          "distance_m": 2100.0,
+          "support": 9
+        },
+        {
+          "kind": "BrakeRelease",
+          "distance_m": 2112.0,
+          "support": 9
+        },
+        {
+          "kind": "ThrottlePickup",
+          "distance_m": 2212.0,
+          "support": 9
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "start_m": 2276.5,
+      "end_m": 2307.5,
+      "apex_m": 2286.5,
+      "heading_apex_m": 2285.5,
+      "direction": "Left",
+      "turn_angle": -0.09117329,
+      "peak_curvature": 0.0036744836,
+      "support": 7,
+      "parent_id": null,
+      "match_fraction": 0.875,
+      "decision_events": []
+    },
+    {
+      "id": 9,
+      "start_m": 2429.5,
+      "end_m": 2637.9995,
+      "apex_m": 2550.9995,
+      "heading_apex_m": 2535.4998,
+      "direction": "Right",
+      "turn_angle": 1.8174651,
+      "peak_curvature": 0.013210325,
+      "support": 6,
+      "parent_id": null,
+      "match_fraction": 0.75,
+      "decision_events": [
+        {
+          "kind": "BrakeOnset",
+          "distance_m": 2427.0,
+          "support": 9
+        },
+        {
+          "kind": "ThrottleDip",
+          "distance_m": 2430.5,
+          "support": 9
+        },
+        {
+          "kind": "BrakeRelease",
+          "distance_m": 2469.0,
+          "support": 9
+        },
+        {
+          "kind": "ThrottlePickup",
+          "distance_m": 2557.0,
+          "support": 9
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "start_m": 2697.9995,
+      "end_m": 2733.9995,
+      "apex_m": 2726.9995,
+      "heading_apex_m": 2724.4995,
+      "direction": "Left",
+      "turn_angle": -0.037968874,
+      "peak_curvature": 0.0020002415,
+      "support": 8,
+      "parent_id": null,
+      "match_fraction": 0.8888889,
+      "decision_events": []
+    },
+    {
+      "id": 11,
+      "start_m": 2780.4995,
+      "end_m": 2855.9995,
+      "apex_m": 2825.4995,
+      "heading_apex_m": 2821.4995,
+      "direction": "Right",
+      "turn_angle": 0.63355124,
+      "peak_curvature": 0.009051192,
+      "support": 7,
+      "parent_id": null,
+      "match_fraction": 0.7777778,
+      "decision_events": [
+        {
+          "kind": "BrakeOnset",
+          "distance_m": 2781.0,
+          "support": 9
+        },
+        {
+          "kind": "ThrottleDip",
+          "distance_m": 2790.5,
+          "support": 8
+        },
+        {
+          "kind": "BrakeRelease",
+          "distance_m": 2832.0,
+          "support": 8
+        },
+        {
+          "kind": "ThrottlePickup",
+          "distance_m": 2899.5,
+          "support": 9
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "start_m": 3039.9995,
+      "end_m": 3060.9995,
+      "apex_m": 3054.9995,
+      "heading_apex_m": 3051.9995,
+      "direction": "Left",
+      "turn_angle": -0.12818003,
+      "peak_curvature": 0.0023609293,
+      "support": 8,
+      "parent_id": null,
+      "match_fraction": 1.0,
+      "decision_events": [
+        {
+          "kind": "FlatDirectionChange",
+          "distance_m": 2928.0,
+          "support": 7
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "start_m": 3391.4995,
+      "end_m": 3413.9995,
+      "apex_m": 3406.9995,
+      "heading_apex_m": 3402.4995,
+      "direction": "Left",
+      "turn_angle": -0.07820439,
+      "peak_curvature": 0.0024446645,
+      "support": 9,
+      "parent_id": null,
+      "match_fraction": 1.0,
+      "decision_events": [
+        {
+          "kind": "ThrottleDip",
+          "distance_m": 3355.0,
+          "support": 7
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "start_m": 3730.9995,
+      "end_m": 3804.4995,
+      "apex_m": 3747.4995,
+      "heading_apex_m": 3757.4995,
+      "direction": "Right",
+      "turn_angle": 0.39645565,
+      "peak_curvature": 0.006336669,
+      "support": 5,
+      "parent_id": null,
+      "match_fraction": 1.0,
+      "decision_events": [
+        {
+          "kind": "BrakeOnset",
+          "distance_m": 3778.0,
+          "support": 8
+        },
+        {
+          "kind": "ThrottleDip",
+          "distance_m": 3781.0,
+          "support": 7
+        },
+        {
+          "kind": "BrakeRelease",
+          "distance_m": 3892.0,
+          "support": 7
+        },
+        {
+          "kind": "ThrottlePickup",
+          "distance_m": 4074.0,
+          "support": 9
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "start_m": 4405.0,
+      "end_m": 4426.0,
+      "apex_m": 4419.0,
+      "heading_apex_m": 4417.0,
+      "direction": "Left",
+      "turn_angle": -0.14793539,
+      "peak_curvature": 0.008053649,
+      "support": 8,
+      "parent_id": null,
+      "match_fraction": 1.0,
+      "decision_events": [
+        {
+          "kind": "ThrottleDip",
+          "distance_m": 4086.0,
+          "support": 9
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "start_m": 4761.5,
+      "end_m": 4796.5,
+      "apex_m": 4794.0,
+      "heading_apex_m": 4782.0,
+      "direction": "Right",
+      "turn_angle": 0.61329067,
+      "peak_curvature": 0.008524038,
+      "support": 7,
+      "parent_id": null,
+      "match_fraction": 0.875,
+      "decision_events": []
+    },
+    {
+      "id": 17,
+      "start_m": 5044.5,
+      "end_m": 5147.0,
+      "apex_m": 5081.5,
+      "heading_apex_m": 5108.5,
+      "direction": "Right",
+      "turn_angle": 0.7843736,
+      "peak_curvature": 0.008637825,
+      "support": 9,
+      "parent_id": null,
+      "match_fraction": 1.0,
+      "decision_events": [
+        {
+          "kind": "BrakeOnset",
+          "distance_m": 5013.0,
+          "support": 9
+        },
+        {
+          "kind": "ThrottleDip",
+          "distance_m": 5020.0,
+          "support": 8
+        },
+        {
+          "kind": "BrakeRelease",
+          "distance_m": 5098.0,
+          "support": 9
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "start_m": 5147.0,
+      "end_m": 5386.0,
+      "apex_m": 5147.0,
+      "heading_apex_m": 5147.0,
+      "direction": "Right",
+      "turn_angle": 2.528358,
+      "peak_curvature": 0.01247135,
+      "support": 5,
+      "parent_id": null,
+      "match_fraction": 1.0,
+      "decision_events": [
+        {
+          "kind": "ThrottlePickup",
+          "distance_m": 5209.0,
+          "support": 8
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "start_m": 5542.9995,
+      "end_m": 5557.9995,
+      "apex_m": 5557.9995,
+      "heading_apex_m": 5552.9995,
+      "direction": "Left",
+      "turn_angle": -0.032953262,
+      "peak_curvature": 0.0016538616,
+      "support": 2,
+      "parent_id": null,
+      "match_fraction": 1.0,
+      "decision_events": [
+        {
+          "kind": "ThrottlePickup",
+          "distance_m": 5657.0,
+          "support": 8
+        }
+      ]
     }
   ],
   "provenance": {
-    "car": "ks_ferrari_f138",
-    "capture": "telemetry_ac_monza_ks_ferrari_f138_20260823_224926.ndjson.gz",
-    "reference_lap": 1,
+    "car": "ks_ferrari_sf70h",
+    "capture": "telemetry_ac_monza_ks_ferrari_sf70h_20260902_161237.ndjson.gz",
+    "estimator": "theta-mdl + ring-consensus + decision-events",
+    "reference_lap": 5,
     "lap_ids": [
-      1,
       2,
+      3,
       5,
-      8
+      8,
+      11,
+      12,
+      13,
+      14,
+      15
     ],
-    "reference_spread_m": 1.115872,
-    "reference_spread_max_m": 6.176606,
-    "reference_spread_max_at_m": 4197.0,
-    "step_m": 1.0
+    "reference_spread_m": 1.0416433,
+    "reference_spread_max_m": 5.442468,
+    "reference_spread_max_at_m": 1798.0,
+    "step_m": 1.0,
+    "sigma_k_per_lap": [
+      0.00075573893,
+      0.0005878362,
+      0.00066312734,
+      0.00048037848,
+      0.0008356253,
+      0.00028879265,
+      0.000797096,
+      0.0005860688,
+      0.0007161492
+    ],
+    "pedal_events": true
   }
 }

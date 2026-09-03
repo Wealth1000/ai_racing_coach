@@ -32,6 +32,32 @@ pub struct TrackId {
 )]
 pub struct CornerId(pub u32);
 
+/// Identifies one recorded coaching session.
+///
+/// Generated at session start from the wall clock (millisecond resolution, so
+/// two sessions started in the same process do not collide) and used as the
+/// session file's name: `<id>.ndjson`. A string rather than a counter so ids
+/// stay unique across machines without coordination.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SessionId(pub String);
+
+impl SessionId {
+    /// A fresh id for a session starting now.
+    pub fn generate() -> Self {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        Self(format!("session_{ms}"))
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl fmt::Display for LapId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "lap {}", self.0)

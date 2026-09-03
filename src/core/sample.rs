@@ -84,7 +84,11 @@ impl SessionInfo {
 ///
 /// Sim-agnostic by construction: nothing here mentions AC, and the conversions
 /// that make that true live in [`Sample::from_ac_frame`].
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+///
+/// `PartialEq` is exact, not approximate: the offline and streaming resamplers
+/// share their arithmetic, so the golden test can demand bit-for-bit equality
+/// rather than a tolerance.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct Sample {
     /// Wall-clock milliseconds. Fine for ordering and dt; not a sim clock.
     pub t_ms: i64,
@@ -118,6 +122,11 @@ pub struct Sample {
     pub rpm: f32,
     /// 0..4. Three or more is off-track by AC's own reckoning.
     pub tyres_out: u8,
+    /// True when the sim is running a live session and the car is out of the
+    /// pits — i.e. this sample describes real driving. False for paused,
+    /// replayed and pit-lane frames, none of which may count toward a
+    /// reference (see `features::lap`).
+    pub live: bool,
     /// Grip multiplier, ~0.98-1.0 on a dry track.
     pub surface_grip: f32,
     /// AC's own elapsed time on the current lap, in ms. Unlike `t_ms` this is a
@@ -154,6 +163,7 @@ impl Sample {
             gear: frame.display_gear(),
             rpm: frame.rpms,
             tyres_out: frame.tyres_out.clamp(0, 4) as u8,
+            live: frame.is_live() && !frame.in_pits(),
             surface_grip: frame.surface_grip,
             lap_time_ms: frame.i_current_time,
         }

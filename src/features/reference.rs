@@ -275,6 +275,40 @@ impl ReferenceStore {
         self.provenance.car == car && self.model_fingerprint == model_fingerprint
     }
 
+    /// A store with no passes: the stand-in a live session uses when no
+    /// personal best exists yet, so the comparison tier stays silent.
+    ///
+    /// Records the model's fingerprint and car, so lookups are consistent with
+    /// a real store — there is simply nothing in it. Never save one: its empty
+    /// provenance would be refused on load, correctly.
+    pub fn empty(model: &TrackModel) -> Self {
+        Self {
+            version: REFERENCE_VERSION,
+            sim: model.sim,
+            track: model.track.clone(),
+            track_length_m: model.track_length_m,
+            model_fingerprint: model.fingerprint(),
+            corners: Vec::new(),
+            provenance: ReferenceProvenance {
+                car: model.provenance.car.clone(),
+                captures: Vec::new(),
+                step_m: model.provenance.step_m,
+            },
+        }
+    }
+
+    /// The stored best pass through one corner, if any lap has set one.
+    ///
+    /// Lookups are by the *row* id, matching how [`extract_all`] reports
+    /// features — the second row of a line-straddling corner is its own id in
+    /// the store too.
+    pub fn pass_for(&self, corner: CornerId) -> Option<&CornerReference> {
+        self.corners
+            .binary_search_by_key(&corner, |c| c.corner_id)
+            .ok()
+            .map(|i| &self.corners[i])
+    }
+
     /// Conventional file name: `<track>_<layout>_pb.json`, sitting beside the
     /// track model it references.
     pub fn file_name(track: &TrackId) -> String {
@@ -478,12 +512,15 @@ pub(crate) mod tests {
             provenance: crate::features::track_model::Provenance {
                 car: "test_car".to_string(),
                 capture: "cap.ndjson".to_string(),
+                estimator: crate::features::track_model::ESTIMATOR.to_string(),
                 reference_lap: LapId(0),
                 lap_ids: vec![LapId(0), LapId(1)],
                 reference_spread_m: 0.5,
                 reference_spread_max_m: 1.0,
                 reference_spread_max_at_m: 100.0,
                 step_m: 1.0,
+                sigma_k_per_lap: vec![1e-3, 1e-3],
+                pedal_events: false,
             },
             corners: vec![
                 crate::features::track_model::ModelCorner {
@@ -496,6 +533,9 @@ pub(crate) mod tests {
                     turn_angle: 1.5,
                     peak_curvature: 0.02,
                     support: 3,
+                    parent_id: None,
+                    match_fraction: 1.0,
+                    decision_events: Vec::new(),
                 },
                 crate::features::track_model::ModelCorner {
                     id: CornerId(1),
@@ -507,6 +547,9 @@ pub(crate) mod tests {
                     turn_angle: -1.2,
                     peak_curvature: 0.02,
                     support: 3,
+                    parent_id: None,
+                    match_fraction: 1.0,
+                    decision_events: Vec::new(),
                 },
             ],
         }
@@ -526,6 +569,9 @@ pub(crate) mod tests {
             turn_angle: 0.8,
             peak_curvature: 0.02,
             support: 3,
+            parent_id: None,
+            match_fraction: 1.0,
+            decision_events: Vec::new(),
         });
         m
     }

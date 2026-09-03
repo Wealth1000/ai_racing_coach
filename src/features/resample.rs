@@ -52,12 +52,27 @@ pub struct ResampledLap {
     pub step_m: f32,
     /// Raw samples dropped for being at or behind the previous distance.
     pub non_monotone_dropped: usize,
+    /// The first sample's absolute lap distance, in metres. Recorded so
+    /// [`Self::index_at`] can translate an absolute distance into the right
+    /// grid index. Most laps start within ~3 m of the start/finish line, so
+    /// this is small but never exactly zero — the logger's first sample is
+    /// rarely on the line itself.
+    pub first_distance_m: f32,
 }
 
 impl ResampledLap {
-    /// Grid index for a distance in metres.
+    /// Grid index for an *absolute* distance in metres.
+    ///
+    /// The grid runs from `first_distance_m` (index 0) outward in `step_m`
+    /// increments. A request for the lap's first sample returns 0; a request
+    /// `step_m` past it returns 1. `index_at` clamps to the last valid
+    /// index if the request overshoots.
     pub fn index_at(&self, distance_m: f32) -> usize {
-        ((distance_m / self.step_m).round() as usize).min(self.samples.len().saturating_sub(1))
+        let offset = distance_m - self.first_distance_m;
+        if offset < 0.0 {
+            return 0;
+        }
+        ((offset / self.step_m).round() as usize).min(self.samples.len().saturating_sub(1))
     }
 }
 
@@ -88,15 +103,23 @@ pub fn resample_lap(samples: &[Sample], step_m: f32) -> Option<ResampledLap> {
         return None;
     }
 
-    // The grid is anchored at absolute distance 0 (the start/finish line), not
-    // at the lap's first sample. That is what makes index i mean the same place
-    // in every lap: a lap starting at 0.4 m and one starting at 0.9 m must not
-    // end up half a metre out of phase with each other.
+    // The grid is anchored at the lap's first sample, not at the start/finish
+    // line. Laps almost never start exactly on the line (the logger captures
+    // whatever frame the logger was on when the boundary was detected), and
+    // a 1-3 m offset would silently shift every corner's grid index by the
+    // same amount. The grid's first sample is `first_idx * step_m` rounded up
+    // from `start`, so the lap's first sample sits at distance
+    // `first_idx * step_m` — close to `start`, on the grid.
+    //
+    // The "index i = same place in every lap" property is still true *after*
+    // `first_distance_m` is applied: callers use `index_at(distance)` rather
+    // than raw indices, so the first-sample offset is transparent to them.
     let first_idx = (start / step_m).ceil() as i64;
     let last_idx = (end / step_m).floor() as i64;
     if last_idx < first_idx {
         return None;
     }
+    let first_distance_m = first_idx as f32 * step_m;
 
     let mut out = Vec::with_capacity((last_idx - first_idx + 1) as usize);
     let mut seg = 0usize;
@@ -126,11 +149,16 @@ pub fn resample_lap(samples: &[Sample], step_m: f32) -> Option<ResampledLap> {
         samples: out,
         step_m,
         non_monotone_dropped: dropped,
+        first_distance_m,
     })
 }
 
 /// Interpolate a single grid point between two raw samples.
-fn interpolate(a: &Sample, b: &Sample, t: f32, distance: f32, step_m: f32) -> Sample {
+///
+/// `pub(crate)` so the runtime's streaming resampler can produce *bit-identical*
+/// output: sharing the function is the only way to guarantee the same arithmetic
+/// in the same order, which is what the golden test asserts.
+pub(crate) fn interpolate(a: &Sample, b: &Sample, t: f32, distance: f32, step_m: f32) -> Sample {
     Sample {
         // Time is interpolated for reference only; it stays a wall clock.
         t_ms: a.t_ms + ((b.t_ms - a.t_ms) as f32 * t) as i64,
@@ -160,6 +188,7 @@ fn interpolate(a: &Sample, b: &Sample, t: f32, distance: f32, step_m: f32) -> Sa
         // fictional average: gear 2.5 does not exist.
         gear: if t < 0.5 { a.gear } else { b.gear },
         tyres_out: if t < 0.5 { a.tyres_out } else { b.tyres_out },
+        live: if t < 0.5 { a.live } else { b.live },
 
         rpm: lerp(a.rpm, b.rpm, t),
         surface_grip: lerp(a.surface_grip, b.surface_grip, t),
@@ -202,6 +231,7 @@ mod tests {
             gear: 4,
             rpm: 6000.0,
             tyres_out: 0,
+            live: true,
             surface_grip: 1.0,
             lap_time_ms: (distance * 10.0) as i32,
         }

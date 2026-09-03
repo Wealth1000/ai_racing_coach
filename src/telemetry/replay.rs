@@ -26,7 +26,10 @@ const MAX_BAD_LINE_FRACTION: f64 = 0.01;
 
 pub struct NdjsonReplaySource {
     path: PathBuf,
-    reader: Box<dyn BufRead>,
+    /// `+ Send` so the whole source can move onto the live pipeline's source
+    /// thread; both `BufReader<File>` and `BufReader<GzDecoder<File>>` are
+    /// `Send`, so this costs nothing at the call sites.
+    reader: Box<dyn BufRead + Send>,
     session: Option<SessionInfo>,
     sidecar: Option<Sidecar>,
     line_no: usize,
@@ -52,7 +55,7 @@ impl NdjsonReplaySource {
             source,
         })?;
 
-        let reader: Box<dyn BufRead> = if path
+        let reader: Box<dyn BufRead + Send> = if path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
         {

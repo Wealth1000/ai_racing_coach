@@ -371,6 +371,7 @@ mod tests {
                         gear: 4,
                         rpm: 6000.0,
                         tyres_out: 0,
+                        live: true,
                         surface_grip: 1.0,
                         lap_time_ms: (d * 33.0) as i32,
                     }
@@ -378,6 +379,7 @@ mod tests {
                 .collect(),
             step_m: 1.0,
             non_monotone_dropped: 0,
+            first_distance_m: 0.0,
         }
     }
 
@@ -393,6 +395,9 @@ mod tests {
             turn_angle: 1.5,
             peak_curvature: 0.02,
             support: 3,
+            parent_id: None,
+            match_fraction: 1.0,
+            decision_events: Vec::new(),
         }
     }
 
@@ -596,7 +601,8 @@ mod tests {
 
     #[test]
     fn a_corner_the_grid_does_not_cover_is_skipped() {
-        // Grid runs 100–500 m; the corner starts at 80 m.
+        // Grid runs 100–500 m; pick a corner past the grid's end so the
+        // grid genuinely cannot cover it.
         let short_head: Vec<Sample> = lap(500, |_| 40.0, |_| 0.0, |_| 1.0)
             .samples
             .into_iter()
@@ -606,8 +612,15 @@ mod tests {
             samples: short_head,
             step_m: 1.0,
             non_monotone_dropped: 0,
+            first_distance_m: 100.0,
         };
-        assert!(extract(&g, &corner90(), &P, LapId(0)).is_none());
+        let uncovered = ModelCorner {
+            id: CornerId(0),
+            start_m: 510.0,
+            end_m: 560.0,
+            ..corner90()
+        };
+        assert!(extract(&g, &uncovered, &P, LapId(0)).is_none());
 
         // And one that ends past the grid: the lap stops at 449 m, the corner
         // at 470 m.
@@ -616,6 +629,7 @@ mod tests {
             samples: tail,
             step_m: 1.0,
             non_monotone_dropped: 0,
+            first_distance_m: 0.0,
         };
         let late = ModelCorner {
             start_m: 420.0,
@@ -634,12 +648,15 @@ mod tests {
             provenance: Provenance {
                 car: "test_car".to_string(),
                 capture: "cap.ndjson".to_string(),
+                estimator: crate::features::track_model::ESTIMATOR.to_string(),
                 reference_lap: LapId(0),
                 lap_ids: vec![LapId(0), LapId(1)],
                 reference_spread_m: 0.5,
                 reference_spread_max_m: 1.0,
                 reference_spread_max_at_m: 100.0,
                 step_m: 1.0,
+                sigma_k_per_lap: vec![1e-3, 1e-3],
+                pedal_events: false,
             },
             corners,
         }
@@ -680,6 +697,7 @@ mod tests {
             samples: vec![],
             step_m: 1.0,
             non_monotone_dropped: 0,
+            first_distance_m: 0.0,
         };
         assert!(extract(&empty, &corner90(), &P, LapId(0)).is_none());
     }

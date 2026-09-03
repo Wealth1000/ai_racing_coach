@@ -385,6 +385,7 @@ mod tests {
                     gear: 4,
                     rpm: 6000.0,
                     tyres_out: 0,
+                    live: true,
                     surface_grip: 1.0,
                     lap_time_ms: (d * 33.0) as i32,
                 });
@@ -395,6 +396,7 @@ mod tests {
             samples,
             step_m: 1.0,
             non_monotone_dropped: 0,
+            first_distance_m: 0.0,
         }
     }
 
@@ -528,6 +530,7 @@ mod tests {
                 samples: lap_from_curvature(&[(n as f32, 0.0)]).samples,
                 step_m: 1.0,
                 non_monotone_dropped: 0,
+                first_distance_m: 0.0,
             };
             assert!(detect_corners(&lap).is_empty(), "n = {n}");
         }

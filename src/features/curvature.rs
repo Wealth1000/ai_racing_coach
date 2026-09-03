@@ -205,6 +205,7 @@ mod tests {
                     gear: 4,
                     rpm: 6000.0,
                     tyres_out: 0,
+                    live: true,
                     surface_grip: 1.0,
                     lap_time_ms: i as i32 * 30,
                 }

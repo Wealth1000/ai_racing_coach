@@ -139,6 +139,172 @@ impl Lap {
     }
 }
 
+/// The per-sample lap-boundary state machine, extracted from [`LapTracker`]
+/// so the runtime's streaming pipeline can apply *exactly* the same wrap rule
+/// (and the same small-backward-step clamping) without buffering a lap.
+///
+/// One call per sample, in order. The sample is clamped in place; the return
+/// value says whether a start/finish crossing happened immediately before it —
+/// i.e. this sample belongs to a new lap.
+#[derive(Debug, Default)]
+pub struct LapBoundaryDetector {
+    prev_frac: Option<f32>,
+    /// Highest `lap_frac` seen so far this lap, used to clamp out the small
+    /// backward steps (58 of them in the MX5 capture, none in the F138) that
+    /// would otherwise make the distance axis non-monotone.
+    max_frac: f32,
+}
+
+impl LapBoundaryDetector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one sample. Returns `true` when it is the first sample of a new
+    /// lap.
+    ///
+    /// Mirrors [`LapTracker::push`] exactly: clamp first, then detect the wrap,
+    /// then fold the sample into the running state. On a wrap the state resets
+    /// *before* the new sample is folded in, so the boundary sample counts
+    /// toward the lap it starts.
+    pub fn push(&mut self, sample: &mut Sample, track_length: f32) -> bool {
+        // Clamp the distance axis monotone within a lap. Left alone, a
+        // centimetre-scale backward step puts a zero or negative denominator
+        // into the resampler and a spurious spike into the curvature.
+        if sample.lap_frac < self.max_frac && self.max_frac - sample.lap_frac < WRAP_DROP {
+            sample.lap_frac = self.max_frac;
+            sample.lap_distance = self.max_frac * track_length;
+        }
+
+        let wrapped = self
+            .prev_frac
+            .is_some_and(|prev| prev - sample.lap_frac > WRAP_DROP);
+
+        if wrapped {
+            self.prev_frac = None;
+            self.max_frac = 0.0;
+        }
+
+        self.max_frac = self.max_frac.max(sample.lap_frac);
+        self.prev_frac = Some(sample.lap_frac);
+        wrapped
+    }
+}
+
+/// The judgement on one lap, computed identically offline and live.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LapScore {
+    pub quality: LapQuality,
+    /// Fraction of the spline the lap's samples actually cover.
+    pub coverage: f32,
+    /// Total heading change, radians. ~+2*pi when clean.
+    pub net_rotation: f32,
+    /// Samples with 3+ tyres off the track.
+    pub off_track_frames: u32,
+    /// Samples where the sim was not live, or the car was in the pits.
+    pub not_live_frames: u32,
+    /// Wall-clock duration from the lap's first to its last sample, ms.
+    pub wall_duration_ms: i64,
+}
+
+/// Scores a lap as its samples arrive, holding a handful of scalars and never
+/// the samples themselves.
+///
+/// This is the quality half of [`LapTracker`], extracted so the runtime's
+/// streaming pipeline can judge a lap *the moment it ends* — with the same
+/// counters, the same thresholds and the same ordering of verdicts — without
+/// buffering the lap to do it. Feed samples in stream order (after the
+/// boundary detector's clamping, so both paths see the same `lap_frac`),
+/// then [`close`](Self::close) at the start/finish crossing; `close` also
+/// resets the scorer for the next lap.
+#[derive(Debug, Default)]
+pub struct LapScorer {
+    off_track_frames: u32,
+    not_live_frames: u32,
+    rotation: f32,
+    prev_heading: Option<f32>,
+    /// `(lap_frac, t_ms)` of the first sample of the lap being scored.
+    first: Option<(f32, i64)>,
+    /// The same, for the most recent sample.
+    last: (f32, i64),
+    /// Whether any sample has been folded in yet.
+    pushed: bool,
+}
+
+impl LapScorer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one sample into the running score.
+    pub fn push(&mut self, s: &Sample) {
+        if !self.pushed {
+            self.first = Some((s.lap_frac, s.t_ms));
+            self.pushed = true;
+        }
+        self.last = (s.lap_frac, s.t_ms);
+
+        if s.tyres_out >= OFF_TRACK_TYRES {
+            self.off_track_frames += 1;
+        }
+        if !s.live {
+            self.not_live_frames += 1;
+        }
+        if let Some(prev) = self.prev_heading {
+            self.rotation += angle_delta(prev, s.heading);
+        }
+        self.prev_heading = Some(s.heading);
+    }
+
+    /// Whether any sample has been folded in since the last close.
+    pub fn is_empty(&self) -> bool {
+        !self.pushed
+    }
+
+    /// Finalise the lap being scored and reset for the next one.
+    pub fn close(&mut self) -> LapScore {
+        let (first_frac, first_t) = self.first.unwrap_or((0.0, 0));
+        let coverage = if self.pushed {
+            (self.last.0 - first_frac).abs()
+        } else {
+            0.0
+        };
+        let wall_duration_ms = if self.pushed {
+            self.last.1 - first_t
+        } else {
+            0
+        };
+
+        // Order matters. Completeness first: a partial lap never had a full
+        // revolution to make, so it cannot be judged for rotation. Then
+        // not-live, whose geometry may be junk. Then the spin, ahead of
+        // off-track, because a spin is the more specific finding and usually
+        // *causes* the off-track frames — reporting the symptom would bury it.
+        let quality = if coverage < COMPLETE_FRACTION {
+            LapQuality::Partial
+        } else if self.not_live_frames > 0 {
+            LapQuality::NotLive
+        } else if (self.rotation.abs() - TAU).abs() > SPIN_TOLERANCE {
+            LapQuality::Spun
+        } else if self.off_track_frames > 0 {
+            LapQuality::OffTrack
+        } else {
+            LapQuality::Clean
+        };
+
+        let score = LapScore {
+            quality,
+            coverage,
+            net_rotation: self.rotation,
+            off_track_frames: self.off_track_frames,
+            not_live_frames: self.not_live_frames,
+            wall_duration_ms,
+        };
+        *self = Self::default();
+        score
+    }
+}
+
 /// Splits a frame stream into laps.
 ///
 /// Streaming in the sense that matters — it never holds more than the lap
@@ -147,17 +313,9 @@ impl Lap {
 pub struct LapTracker {
     track_length: f32,
     current: Vec<Sample>,
-    prev_frac: Option<f32>,
-    /// Highest `lap_frac` seen so far this lap, used to clamp out the small
-    /// backward steps (58 of them in the MX5 capture, none in the F138) that
-    /// would otherwise make the distance axis non-monotone.
-    max_frac: f32,
+    boundary: LapBoundaryDetector,
+    scorer: LapScorer,
     next_id: u32,
-
-    off_track_frames: u32,
-    not_live_frames: u32,
-    rotation: f32,
-    prev_heading: Option<f32>,
 
     /// Set at a crossing; counts down frames until `iLastTime` has latched.
     pending: Option<PendingLap>,
@@ -179,13 +337,9 @@ impl LapTracker {
         Self {
             track_length,
             current: Vec::new(),
-            prev_frac: None,
-            max_frac: 0.0,
+            boundary: LapBoundaryDetector::new(),
+            scorer: LapScorer::new(),
             next_id: 0,
-            off_track_frames: 0,
-            not_live_frames: 0,
-            rotation: 0.0,
-            prev_heading: None,
             pending: None,
             started_at_wrap: false,
         }
@@ -195,17 +349,9 @@ impl LapTracker {
     pub fn push(&mut self, frame: &AcFrame) -> Option<Lap> {
         let mut sample = Sample::from_ac_frame(frame, self.track_length);
 
-        // Clamp the distance axis monotone within a lap. Left alone, a
-        // centimetre-scale backward step puts a zero or negative denominator
-        // into the resampler and a spurious spike into the curvature.
-        if sample.lap_frac < self.max_frac && self.max_frac - sample.lap_frac < WRAP_DROP {
-            sample.lap_frac = self.max_frac;
-            sample.lap_distance = self.max_frac * self.track_length;
-        }
-
-        let wrapped = self
-            .prev_frac
-            .is_some_and(|prev| prev - sample.lap_frac > WRAP_DROP);
+        // Clamp + wrap detection live in the shared detector so the runtime
+        // pipeline sees the same lap boundaries this tracker does.
+        let wrapped = self.boundary.push(&mut sample, self.track_length);
 
         let mut emitted = None;
 
@@ -216,7 +362,6 @@ impl LapTracker {
                 frames_waited: 0,
                 started_at_wrap: self.started_at_wrap,
             });
-            self.reset_lap_state();
             // Every lap after the first was entered through a crossing we saw.
             self.started_at_wrap = true;
         }
@@ -235,20 +380,10 @@ impl LapTracker {
             }
         }
 
-        // Accumulate this frame into the lap being built.
-        self.max_frac = self.max_frac.max(sample.lap_frac);
-        self.prev_frac = Some(sample.lap_frac);
-
-        if sample.tyres_out >= OFF_TRACK_TYRES {
-            self.off_track_frames += 1;
-        }
-        if !frame.is_live() || frame.in_pits() {
-            self.not_live_frames += 1;
-        }
-        if let Some(prev) = self.prev_heading {
-            self.rotation += angle_delta(prev, sample.heading);
-        }
-        self.prev_heading = Some(sample.heading);
+        // Accumulate this frame into the lap being built. The scorer sees the
+        // same clamped sample the boundary detector produced, so its coverage
+        // and wall-duration match what the buffered samples would say.
+        self.scorer.push(&sample);
         self.current.push(sample);
 
         emitted
@@ -277,51 +412,17 @@ impl LapTracker {
         let id = LapId(self.next_id);
         self.next_id += 1;
 
-        let coverage = match (samples.first(), samples.last()) {
-            (Some(f), Some(l)) => (l.lap_frac - f.lap_frac).abs(),
-            _ => 0.0,
-        };
-        let wall_duration_ms = match (samples.first(), samples.last()) {
-            (Some(f), Some(l)) => l.t_ms - f.t_ms,
-            _ => 0,
-        };
-
-        // Order matters. Completeness first: a partial lap never had a full
-        // revolution to make, so it cannot be judged for rotation. Then
-        // not-live, whose geometry may be junk. Then the spin, ahead of
-        // off-track, because a spin is the more specific finding and usually
-        // *causes* the off-track frames — reporting the symptom would bury it.
-        let quality = if coverage < COMPLETE_FRACTION {
-            LapQuality::Partial
-        } else if self.not_live_frames > 0 {
-            LapQuality::NotLive
-        } else if (self.rotation.abs() - TAU).abs() > SPIN_TOLERANCE {
-            LapQuality::Spun
-        } else if self.off_track_frames > 0 {
-            LapQuality::OffTrack
-        } else {
-            LapQuality::Clean
-        };
-
+        let score = self.scorer.close();
         Lap {
             id,
             samples,
-            quality,
-            coverage,
-            net_rotation: self.rotation,
-            off_track_frames: self.off_track_frames,
-            not_live_frames: self.not_live_frames,
+            quality: score.quality,
+            coverage: score.coverage,
+            net_rotation: score.net_rotation,
+            off_track_frames: score.off_track_frames,
+            not_live_frames: score.not_live_frames,
             ac_lap_time_ms: None,
-            wall_duration_ms,
+            wall_duration_ms: score.wall_duration_ms,
         }
-    }
-
-    fn reset_lap_state(&mut self) {
-        self.max_frac = 0.0;
-        self.prev_frac = None;
-        self.off_track_frames = 0;
-        self.not_live_frames = 0;
-        self.rotation = 0.0;
-        self.prev_heading = None;
     }
 }

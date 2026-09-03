@@ -14,9 +14,30 @@ name = "coach"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.102"
+# The GUI (Batch 15): eframe carries the windowing and event loop that bare
+# egui lacks (D15 — egui alone cannot open a window). Default features give
+# the glow renderer; the wgpu backend is opt-in and not wanted here, a
+# driving-coach window has no use for a GPU queue.
+eframe = "0.33"
 clap = { version = "4.5", features = ["derive"] }
+# The live pipeline's bounded channels. std::sync::mpsc cannot drop-oldest from
+# the sending side (its Receiver is !Sync), and back-pressure must never reach
+# the telemetry source, so the live wiring needs MPMC channels.
+crossbeam-channel = "0.5"
 flate2 = "1.1.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0"
+# The voice sink's platform synthesiser. On Linux it speaks through
+# speech-dispatcher: `speech-dispatcher-devel` (headers) at build time and
+# `speech-dispatcherd` at run time. The dependency is optional because those
+# headers are a system package — CI and header-less machines build without
+# `voice`, and `coach live --voice tts` degrades to counted silence exactly
+# as it does on a machine with no speech daemon. Build with
+# `--features voice` once the headers are installed to get real audio.
+tts = { version = "0.26", optional = true }
+
+[features]
+default = []
+# Speak advice through the OS synthesiser (see the `tts` dependency above).
+voice = ["dep:tts"]

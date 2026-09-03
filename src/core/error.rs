@@ -72,6 +72,11 @@ pub enum CoachError {
         artefact: &'static str,
         detail: String,
     },
+
+    /// The window could not be opened or the event loop failed. The session
+    /// itself is fine; only the surface the driver watches it on is not.
+    #[error("the GUI failed: {detail}")]
+    Ui { detail: String },
 }
 
 impl CoachError {

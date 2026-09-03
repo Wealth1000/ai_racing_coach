@@ -185,8 +185,8 @@ Referenced by ID throughout §5. **Sev** is impact on the MVP, not on today's ou
 | **D11** | High | O(L²) master-lap selection needs every lap in memory up front, and calls `transform_to_world_position()` **inside the inner loop** — two ~1,500-element `Vec` allocations per pair, plus a ~9 MB DP table per pair. Incompatible with streaming | `main.rs:110-124` (allocs at `114-115`) | Batch 6 |
 | **D12** | High | No resampling, despite `sample.rs`. Dedup is timestamp-only. AMS2 logs at 20 Hz wall-clock (`AMS2Program.cs:231`), so metre-spacing varies ~4× across the *measured* 0.01–73.59 m/s speed range, while curvature and Fréchet both assume comparable arc-length spacing | `sample.rs:17-19` | Batch 5 |
 | **D13** | High | **Nothing in the crate derives `Serialize`.** `TrackCorner` is `#[derive(Debug)]` only — not even `Clone`. Persistence is impossible | `corner.rs:10-19` | Batch 6 |
-| **D14** | Medium | Only output sink is `{:?}` Debug formatting, with `.unwrap()` on every I/O call. Not machine-readable, panics on a full disk | `debug_helpers/dump_to_file.rs` | Batch 13 |
-| **D15** | Medium | Dependencies don't match intent: bare `egui` 0.33.3 with **no `eframe`/`winit`/`wgpu` in `Cargo.lock`** (cannot open a window); `anyhow` declared and unused; no `rodio`/`cpal`, no `tracing` | `Cargo.toml`, `Cargo.lock` | Batches 1, 12, 14 |
+| **D14** | Medium | Only output sink is `{:?}` Debug formatting, with `.unwrap()` on every I/O call. Not machine-readable, panics on a full disk | `debug_helpers/dump_to_file.rs` | Batch 14 |
+| **D15** | Medium | Dependencies don't match intent: bare `egui` 0.33.3 with **no `eframe`/`winit`/`wgpu` in `Cargo.lock`** (cannot open a window); `anyhow` declared and unused; no `tts`, no `tracing` | `Cargo.toml`, `Cargo.lock` | Batches 1, 13, 15 |
 | **D16** | **Critical** | 26 MB untracked dataset with `.gitignore` containing only `/target`. One `git add -A` puts it in history permanently | `.gitignore` | Batch 0 |
 | **D17** | Low | `ReadMe.md:1` opens a ```` ```markdown ```` fence that is never closed — the entire README renders as one code block | `ReadMe.md:1` | Batch 0 |
 | **D18** | High | `AMS2Program.cs` emits schema 3 (short keys) via `[JsonPropertyName]`; the committed dataset is schema 2. Re-running the committed logger yields a file the Rust parser reads as all zeros, with no error. **D1 demonstrated in the wild** | `AMS2Program.cs:42-125` vs dataset | Batch 2 |
@@ -255,8 +255,8 @@ reports *where* the two laps diverged most, which the DP discards.
                             ┌─────────────────────────┼─────────────────────────┐
                             ▼                         ▼                         ▼
                      ┌────────────┐            ┌────────────┐           ┌────────────┐
-                     │  AudioSink │            │   ui/ app  │           │  storage/  │
-                     │ WAV + rodio│            │   eframe   │           │  NDJSON    │
+                     │  TtsSink   │            │   ui/ app  │           │  storage/  │
+                     │ OS speech  │            │   eframe   │           │  NDJSON    │
                      └────────────┘            └────────────┘           └────────────┘
 ```
 
@@ -279,8 +279,8 @@ src/
  │    ├── schema.rs          #   Schema enum + detection + loud failure   [Batch 2]
  │    ├── source.rs          #   trait TelemetrySource                    [Batch 3]
  │    ├── replay.rs          #   NdjsonReplaySource                       [Batch 3]
- │    ├── ac_shared_memory.rs#   #[cfg(windows)] SM reader                [Batch 4]
- │    └── record.rs          #   coach record → NDJSON                    [Batch 4]
+ │    ├── ac_shared_memory.rs#   #[cfg(windows)] SM reader                [Batch 16]
+ │    └── record.rs          #   coach record → NDJSON                    [Batch 16]
  ├── features/               # raw → structured  (renamed from feature/)
  │    ├── resample.rs        #   arc-length resampling                    [Batch 5]
  │    ├── lap.rs             #   lap boundary detection                   [Batch 5]
@@ -300,22 +300,19 @@ src/
  │    ├── phrasing.rs        #   issue → words, controller-aware          [Batch 10]
  │    └── decision.rs        #   don't-distract-the-driver logic          [Batch 11]
  ├── audio/
- │    ├── sink.rs            #   trait FeedbackSink, AudioSink            [Batch 12]
- │    └── phrase_bank.rs     #   WAV inventory + composition              [Batch 12]
+ │    └── sink.rs            #   trait FeedbackSink, TtsSink, NullSink    [Batch 13]
  ├── ui/
- │    └── app.rs             #   eframe app                               [Batch 14]
+ │    └── app.rs             #   eframe app                               [Batch 15]
  ├── storage/
- │    ├── session.rs         #   session NDJSON                           [Batch 13]
- │    └── dataset.rs         #   flat feature-vector export               [Batch 13]
+ │    ├── session.rs         #   session NDJSON                           [Batch 14]
+ │    └── dataset.rs         #   flat feature-vector export               [Batch 14]
  └── runtime/
-      ├── pipeline.rs        #   CoachPipeline: stage composition          [Batch 3]
-      └── threads.rs         #   thread + channel wiring                   [Batch 11]
+      ├── pipeline.rs        #   CoachPipeline: stage composition          [Batch 12]
+      └── threads.rs         #   thread + channel wiring                   [Batch 12]
 
 data/
  ├── tracks/                 # <track>_<layout>.json, <track>_<layout>_pb.json
  └── sessions/               # <session-id>.ndjson
-assets/
- └── voice/                  # pre-rendered WAV phrase bank
 tools/
  └── loggers/                # the two C# loggers (moved in Batch 0)
 tests/
@@ -356,7 +353,7 @@ pub trait DrivingModel {
     fn name(&self) -> &'static str;
 }
 
-// audio/sink.rs — how advice reaches the driver.              [Batch 12]
+// audio/sink.rs — how advice reaches the driver.              [Batch 13]
 pub trait FeedbackSink {
     fn deliver(&mut self, advice: &Advice) -> Result<(), CoachError>;
     fn flush(&mut self) {}
@@ -374,7 +371,7 @@ because one corner routinely has more than one problem.
 ```text
  telemetry thread          pipeline thread              consumer threads
  ────────────────          ───────────────              ────────────────
- loop {                    loop {                       AudioSink  (owns rodio stream)
+ loop {                    loop {                       TtsSink    (owns speech synth)
    src.next_frame()  ──►     rx.recv()                  ui/app     (eframe, own thread)
    tx.try_send()             stages.on_sample()   ──►   storage    (buffered writer)
  }                           advice_tx.try_send()
@@ -398,7 +395,7 @@ Taken with the user. These narrow the ReadMe. **Do not relitigate mid-build.**
 | 1 | Target sim for MVP | **Assetto Corsa (2014)** — *not* AMS2 | AMS2 "cannot be used right now". The ReadMe names AMS2 as the initial target; this reverses that. |
 | 2 | Dev / ship split | Develop on **Linux**, cross-compile a **Windows** binary, test there | Where the user works vs where the sim runs. Forces §3.1's streaming design. |
 | 3 | MVP scope | ReadMe **Phase 1 + Phase 2** | Live telemetry, features, rules, real-time feedback, audio, basic GUI, session logging. |
-| 4 | Voice | **Pre-rendered WAV clips** + `rodio` | No runtime TTS, no OS speech dependency, no network. Fully offline per the ReadMe. Cost: a fixed phrase inventory (Appendix D). |
+| 4 | Voice | **OS text-to-speech** via the `tts` crate (SAPI on Windows, speech-dispatcher on Linux) | **Reversed 2026-09-03 by the user** — was pre-rendered WAV + `rodio`. The phrased sentences embed measured numbers ("brake 12 metres earlier", "you lost 0.18 of a second"), which a fixed WAV inventory cannot speak without clip-composition machinery; TTS says any string, so no phrase bank and no inventory to keep in sync. Still fully offline: the synthesiser is OS-local, no network, no runtime dependency on a WAV tree. |
 | 5 | Reference to coach against | **The driver's own best lap**, per-corner personal best | No reference-lap dataset exists and none can be acquired offline. Also sidesteps car/tyre/setup normalisation entirely. |
 | 6 | AC transport | **Shared memory**, not UDP | See §4.1. |
 | 7 | AMS2 parsing | **Kept, not removed** | It is the only regression corpus in the repo. AMS2 is deferred as a *live* target only. |
@@ -441,4 +438,83 @@ Windows:  coach live     → real-time coaching
 UDP is demoted to an optional later source for the sim-on-another-machine case. Its layout is
 unverified (Appendix B) and it must not gate the MVP.
 
-<!-- CHUNK-BOUNDARY -->
+---
+
+## 5. Remaining batches
+
+**Status note, 2026-09-03.** The offline intelligence stack is done and green: schema and
+replay (Batches 1–5), the three-stage corner learner — θ(s) MDL segmentation, ring-alignment
+consensus with the Wilson bound, decision-event clustering — replacing the Batch-6 hysteresis
+detector (`src/features/{segment,consensus,decision,track_model}.rs`, `TrackModel` v2), and
+the full model/coaching chain (Batches 7–11: features, references, rules, advice, phrasing,
+the decision engine). 172 tests.
+
+What the earlier batches deliberately deferred — and what is *not* in the tree — is the live
+path: `runtime/pipeline.rs`, `runtime/threads.rs`, `core/config.rs`, `audio/`, `storage/`,
+`ui/`, and the Windows shared-memory source. Those items were originally tagged
+[Batch 3/4/11] but only their trait seams landed (`TelemetrySource`, `NdjsonReplaySource`,
+`ThrottlingEngine`). The batches below are the remaining work, renumbered in dependency
+order; their numbering supersedes any earlier tags still pointing at 3/4/11 for these files.
+Ordering principle: everything through Batch 15 is developed and verified **on Linux against
+a replay source**; only Batch 16 needs the Windows box, because only live AC shared memory
+exists there.
+
+### Batch 12 — the live pipeline, replay-fed
+
+| Section | |
+|---|---|
+| **Goal** | Stream a capture through the whole intelligence stack one sample at a time and emit throttled `Advice` on a channel, with no lap buffered whole. |
+| **Why now** | Every remaining consumer — voice, UI, storage, and eventually the live Windows source — subscribes to that channel. Nothing downstream can be built or demoed before it exists, and it is the last piece that can be verified purely on Linux replays. |
+| **Files** | *new* `src/runtime/mod.rs`, `src/runtime/pipeline.rs`, `src/runtime/threads.rs`, `src/core/config.rs`; *modified* `src/lib.rs`, `src/main.rs` (`coach live --replay <capture>`), `Cargo.toml` (+`crossbeam-channel`) |
+| **Steps** | 1. `core/config.rs`: `CoachConfig { input: InputDevice, step_m, models_dir }` — the one struct the live path reads instead of scattered flags. 2. `pipeline.rs`: streaming resampler (incremental arc-length interpolation producing the *same* grid as `features/resample.rs` — assert equality in a test against the offline resampler on a real capture lap); streaming lap tracker (reuse `features/lap.rs`'s wrap rule); corner tracker over the frozen `TrackModel` (enter/exit on boundary crossing, ring-aware); per-corner `CornerFeatures` from the samples since entry; `ReferenceStore` + `RuleModel` + `AdviceMapper` + `ThrottlingEngine` wired exactly as `coach analyse` does offline. 3. `threads.rs`: the §3.5 wiring — source thread → `bounded(256)` drop-oldest → pipeline thread → `bounded(64)` drop-oldest → consumer; dropped counts in atomics, surfaced by every consumer. 4. `coach live --replay <capture> [--voice null]`: runs the wiring headless, prints each advice line with lap/corner, and a summary line `N advice, M frames dropped`. |
+| **Key types** | `pub trait Stage { type Out; fn on_sample(&mut self, s: &Sample) -> Vec<Self::Out>; fn on_lap_boundary(&mut self, _lap: LapId) -> Vec<Self::Out> { Vec::new() } }` · `pub struct CoachPipeline { /* resampler, lap tracker, corner tracker, model, engine */ }` with `fn new(model: TrackModel, reference: ReferenceStore, config: CoachConfig) -> Self`, `fn on_sample(&mut self, s: &Sample) -> Vec<Advice>`, `fn on_lap_boundary(&mut self, lap: LapId) -> Vec<Advice>`; `pub struct LiveWiring { pub advice_rx: Receiver<Advice>, pub dropped_frames: Arc<AtomicU64>, pub dropped_advice: Arc<AtomicU64> }`, `pub fn spawn(source: Box<dyn TelemetrySource + Send>, pipeline: CoachPipeline) -> LiveWiring` |
+| **Acceptance criteria** | On Linux: `coach live --replay ndjson_data/telemetry_ac_monza_*.ndjson.gz` ends with `… advice, 0 frames dropped`, and the advice set it prints for the fastest lap is the same set `coach analyse` reports for that lap (same corners, same kinds; phrasing identical). A unit test asserts streaming-resampler output equals `features::resample` output on a Monza lap, sample for sample. |
+| **Risks & gotchas** | Streaming resample drift vs the offline resampler (make the golden test the first thing, not the last). Back-pressure must never reach the source thread (§3.5; **D11**'s lesson). Corner windows straddling the lap wrap: the tracker must keep the window across the boundary — the TrackModel already stores line-straddling corners as two rows sharing a `parent_id`; the live tracker must treat them as one corner. The `Stage` trait's "must not buffer a lap" rule bends for exactly one thing: per-corner features need the window from entry to exit, which is bounded by a corner, not a lap — document that bound in the trait. |
+
+### Batch 13 — voice: the OS TTS sink
+
+| Section | |
+|---|---|
+| **Goal** | The driver hears the phrased advice, spoken by the operating system's synthesiser. |
+| **Why now** | Locked decision 4 (reversed 2026-09-03): TTS, not pre-rendered WAV. `Advice.phrased` is already a complete spoken sentence — "brake 12 metres earlier — your best lap braked here" — with the measured numbers in it; TTS speaks any such string, so the phrase-bank layer (inventory, composition, Appendix D) simply does not exist anymore. |
+| **Files** | *new* `src/audio/mod.rs`, `src/audio/sink.rs`; *modified* `Cargo.toml` (+`tts`), `src/lib.rs`, `src/main.rs` (`coach live --voice {tts,null}`) |
+| **Steps** | 1. `audio/sink.rs`: the §3.4 trait verbatim — `FeedbackSink { deliver(&mut self, &Advice) -> Result<(), CoachError>; flush(&mut self) {} }`. 2. `NullSink` (records what it was handed; the test and CI sink). 3. `TtsSink`: wraps `tts::Tts`; `deliver` is *never* allowed to block or queue — if the synthesiser is still speaking the previous line, the new one is counted as skipped and dropped, because coaching advice is perishable (a braking tip delivered three corners late is worse than silence). Skipped counts are surfaced next to the channel drop counts. 4. `coach live --voice tts` on the consumer thread. |
+| **Key types** | `pub struct TtsSink { synth: tts::Tts, spoken: u64, skipped: u64 }` · `pub struct NullSink { pub delivered: Vec<Advice> }` · `impl FeedbackSink for TtsSink { fn deliver(&mut self, a: &Advice) -> Result<(), CoachError> { … } }` |
+| **Acceptance criteria** | `cargo test` includes: a `NullSink` receives exactly the advice the decision engine emits for a fixture lap (no re-ordering, no loss); a `TtsSink` constructed with no speech backend available reports every deliver as skipped and returns `Ok(())` — voice failure degrades to silence, never to an error path that could stall the pipeline. On a desktop Linux box with speech-dispatcher running, `coach live --replay <capture> --voice tts` audibly speaks the same lines it prints. |
+| **Risks & gotchas** | `tts` needs speech-dispatcher (Linux) / SAPI (Windows); absence must degrade, not fail (**D14**'s spirit: a sink that panics on a missing audio daemon is the same bug class). Block-in-speak: some backends synthesise synchronously — measure, and if any backend blocks, move the `tts::Tts` call behind a one-slot channel to a dedicated speaker thread. Voice selection and rate are **tuning knobs** persisted in `CoachConfig`, not flags re-parsed per run. |
+
+### Batch 14 — session logging and dataset export
+
+| Section | |
+|---|---|
+| **Goal** | Every live session is written to disk as replayable NDJSON, and the accumulated sessions export as flat feature vectors for offline analysis. |
+| **Why now** | Closes **D14** (the last `{:?}`/`unwrap` output path). It also feeds the loop the whole project runs on: sessions become the corpus the models and the personal-best store learn from, without anyone re-running captures by hand. |
+| **Files** | *new* `src/storage/mod.rs`, `src/storage/session.rs`, `src/storage/dataset.rs`; *modified* `src/lib.rs`, `src/main.rs` (`coach live --record-session <dir>`, `coach export-dataset <dir> <out.csv>`) |
+| **Steps** | 1. `session.rs`: a `SessionWriter` emitting NDJSON — one header record (sim, track, car, model fingerprint, config), then one record per lap boundary (lap id, time, clean flag) and one per delivered advice (corner, kind, severity, phrased, deltas, skipped/dropped counters at that moment). Every I/O error is a `CoachError`, never an `unwrap` (**D14**). 2. The writer is itself a `FeedbackSink` consumer plus a lap-boundary observer on the pipeline. 3. `dataset.rs`: read a directory of sessions, join each corner pass with the `TrackModel` corner and any personal best, emit one CSV row per corner pass (the column list = `CornerFeatures` + reference deltas + outcome flags). 4. Both commands verified against the same Monza replay used in Batch 12. |
+| **Key types** | `pub struct SessionWriter { out: BufWriter<File>, events: u64 }` with `fn create(dir: &Path, id: SessionId) -> Result<Self, CoachError>`, `fn write_header(&mut self, h: &SessionHeader) -> Result<(), CoachError>`, `fn write_event(&mut self, e: &SessionEvent) -> Result<(), CoachError>`; `pub fn export_dataset(sessions: &[PathBuf], model: &TrackModel, out: &Path) -> Result<u64, CoachError>` |
+| **Acceptance criteria** | `coach live --replay <capture> --record-session data/sessions/` writes `data/sessions/<session-id>.ndjson`; `coach inspect` on that file parses it (it is the same schema family the replay source reads — header + records, no `{:?}` output anywhere). `coach export-dataset data/sessions out.csv` prints `W rows, C columns` and the CSV opens with one row per corner pass. Disk-full and permission-denied produce a clean `CoachError` message naming the path — verified by a test writing to a read-only directory. |
+| **Risks & gotchas** | Writing must be buffered and on the consumer thread; a sync-per-event writer at 100 Hz would stall the storage consumer and inflate the drop counters (§3.5 again). Schema drift: the session record derives `Serialize` from the same types the rest of the crate uses, so a field added to `Advice` lands in the session log without a second schema to maintain (**D13**'s lesson). Partial sessions (crash mid-recording) must still parse up to the last complete line. |
+
+### Batch 15 — the GUI
+
+| Section | |
+|---|---|
+| **Goal** | A window showing connection state, the corner the car is in, and a colour-coded feed of spoken advice with the drop/skip counters. |
+| **Why now** | Last Linux-verifiable piece. It is the demo surface for the whole MVP and the read-only window into the pipeline while driving (Batch 16 verification will want it on screen). |
+| **Files** | *new* `src/ui/mod.rs`, `src/ui/app.rs`; *modified* `Cargo.toml` (+`eframe`, closing the **D15** `egui`-without-`eframe` gap), `src/lib.rs`, `src/main.rs` (`coach gui [--replay <capture>]`) |
+| **Steps** | 1. `app.rs`: an `eframe::App` holding a `VecDeque<Advice>` (capped, e.g. last 50), the atomic drop/skip counters from `LiveWiring`, and a connection indicator fed by `TelemetrySource::describe()`. 2. UI thread receives from `advice_rx` on each repaint request (`ctx.request_repaint_after`); it never owns or blocks the pipeline. 3. Rows: severity colour (`Info`/`Warn`/`Critical`), corner id + direction, phrased sentence, the numeric deltas as a tooltip. 4. `coach gui --replay` drives the same wiring as `coach live` with the UI as the sole consumer. |
+| **Key types** | `pub struct CoachApp { advice: VecDeque<Advice>, dropped: Arc<AtomicU64>, skipped: Arc<AtomicU64>, source_desc: String }` · `impl eframe::App for CoachApp { fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) }` |
+| **Acceptance criteria** | On Linux: `coach gui --replay ndjson_data/telemetry_ac_monza_*.ndjson.gz` opens a window; as the replay streams, advice rows appear in order with the correct severity colours; the drop counters read 0; closing the window exits the process cleanly (no leaked pipeline threads — checked with a test that drops `LiveWiring` and joins). A screenshot replaces the acceptance text once captured. |
+| **Risks & gotchas** | GUI frameworks and headless CI do not mix: the acceptance command is interactive, so the CI-visible part is thread-shutdown correctness plus a render-free unit test of the row model. Repaint cadence must be driven by `request_repaint_after`, not a busy loop — a 100 Hz repaint loop would starve the pipeline thread on weak hardware. `eframe` pulls `wgpu`; expect the first cold build to be slow — that's fine, it's once. |
+
+### Batch 16 — Windows: shared memory, record, live
+
+| Section | |
+|---|---|
+| **Goal** | The coach reads AC's shared memory directly on Windows: `coach record` writes captures, `coach live` coaches during driving. |
+| **Why now** | Everything before this is Linux/replay-verified by construction; this batch is the first and only one that *must* be verified on the Windows box, so it lands last when everything it depends on is known good. |
+| **Files** | *new* `src/telemetry/ac_shared_memory.rs` (`#[cfg(windows)]`), `src/telemetry/record.rs`; *modified* `src/telemetry/mod.rs`, `src/main.rs` (`coach record`, `coach live` without `--replay`), `.github`/build notes for cross-compilation |
+| **Steps** | 1. `ac_shared_memory.rs`: poll AC's shared-memory blocks at 100 Hz per the `ACProgram.cs` field map in §4.1 (`Physics_*` at 10 ms, `Graphics_*`/`StaticInfo_*` on change), mapping straight into the existing `TelemetryFrame` — the schema the C# logger already writes, so every downstream stage is unchanged. 2. `record.rs`: `coach record [--laps N] <out.ndjson>` — same NDJSON bytes the C# logger produces, gz on `.gz`. 3. `coach live` (no `--replay`) builds the pipeline on `AcSharedMemSource`, with TTS on and the GUI optional. 4. Cross-compile (`x86_64-pc-windows-gnu` or `-msvc`), copy over, verify on track. |
+| **Key types** | `#[cfg(windows)] pub struct AcSharedMemSource { /* mapped physics/graphics/static views */ }` · `#[cfg(windows)] impl TelemetrySource for AcSharedMemSource { fn next_frame(&mut self) -> Result<Option<TelemetryFrame>, CoachError>; … }` · `pub fn record(source: Box<dyn TelemetrySource>, out: &Path, laps: Option<u32>) -> Result<SessionId, CoachError>` |
+| **Acceptance criteria** | On the Windows box: `coach record --laps 5 telemetry_ac_new.ndjson`, then `coach inspect telemetry_ac_new.ndjson` on the Linux box parses it with the schema detected and zero all-zero-field warnings (the **D18** regression check). `coach live` speaks advice at the right corners during a real session, with the GUI showing 0 dropped frames over a full tank. The recording byte-compares on schema detection with the C# logger's output for the same session fields. |
+| **Risks & gotchas** | AC's SM layout is fixed per game version — pin the struct offsets to one AC version and fail loudly on mismatch (the loud-failure rule from **D1**; never the silent zeros of **D18**). Poll faster than the physics tick wastes CPU, slower aliases the 100 Hz signal; 100 Hz matches the logger. `--laps N` termination needs the graphics lap counter, which is only meaningful with `IsValidLap` context (**D7**). Windows Defender occasionally blocks raw shared-memory reads — whitelist in the README, don't code around it. |
