@@ -6,6 +6,10 @@
 # Cargo.toml — bump it there to cut a new release). Re-pushing the branch
 # with the same version overwrites the existing release's assets rather
 # than duplicating them.
+#
+# Windows ships a bare exe (one-step setup: download, double-click —
+# running with no arguments opens the GUI); Linux ships a tar.gz with the
+# README alongside the binary.
 
 name: release
 
@@ -59,35 +63,31 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
 
-      # Package the binary together with the README so the archives are
-      # self-explanatory. Windows runners carry bsdtar, which writes a zip
-      # when the archive name ends in .zip — one packager for both platforms.
+      # Windows ships the bare exe — one-step setup: the browser downloads
+      # it, the user double-clicks it, no unzip step. (Running it with no
+      # arguments opens the GUI.) Linux keeps a tar.gz that carries the
+      # README next to the binary so the archive is self-explanatory.
       - name: Package
         shell: bash
         run: |
           VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
           if [ "${{ runner.os }}" = "Windows" ]; then
-            BINARY=coach.exe
+            ARTIFACT="coach-$VERSION-${{ matrix.target }}.exe"
+            cp target/release/coach.exe "$ARTIFACT"
           else
-            BINARY=coach
+            ARTIFACT="coach-$VERSION-${{ matrix.target }}.tar.gz"
+            # The README is copied in first because tar's `-C` applies to every
+            # member, so it must live next to the binary when tar runs.
+            cp README.md target/release/
+            tar -czf "$ARTIFACT" -C target/release coach README.md
           fi
-          ARCHIVE="coach-$VERSION-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}"
-          # The README is copied in first because tar's `-C` applies to every
-          # member, so it must live next to the binary when tar runs.
-          cp ReadMe.md target/release/
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            # bsdtar (on the runner) writes a zip when the name ends in .zip.
-            tar -a -cf "$ARCHIVE" -C target/release "$BINARY" ReadMe.md
-          else
-            tar -czf "$ARCHIVE" -C target/release "$BINARY" ReadMe.md
-          fi
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "ARTIFACT=$ARTIFACT" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARCHIVE }}
-          path: ${{ env.ARCHIVE }}
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.ARTIFACT }}
           if-no-files-found: error
 
   release:

@@ -26,14 +26,13 @@ Every lap helps — different tracks, different cars, different driving styles. 
 Setup takes about 30 seconds — no accounts, no installer, no configuration:
 
 1. Download the latest release for your platform from the [Releases page](https://github.com/Wealth1000/ai_racing_coach/releases):
-   - **Windows** (`coach-x.y.z-x86_64-pc-windows-msvc.zip`) — the full experience: record straight from the running sim and get live coaching
-   - **Linux** (`coach-x.y.z-x86_64-unknown-linux-gnu.tar.gz`) — analysis and replay coaching from capture files
-2. Unzip anywhere
-3. Run `coach gui` — that's it
+   - **Windows** (`coach-x.y.z-x86_64-pc-windows-msvc.exe`) — one step: download and double-click. Running the exe opens the coach's menu — that's the full experience, record straight from the running sim and get live coaching
+   - **Linux** (`coach-x.y.z-x86_64-unknown-linux-gnu.tar.gz`) — unpack it (`tar -xzf`) for analysis and replay coaching from capture files
+2. That's it — the coach's menu opens
 
 ### Your first session
 
-The coach learns your track before coaching you on it, and the GUI walks you through it — no instructions needed. Launch `coach gui`, pick your simulator from the menu:
+The coach learns your track before coaching you on it, and the GUI walks you through it — no instructions needed. Launch the coach (double-click the exe, or `coach gui` for the same thing), pick your simulator from the menu:
 
 <p>
   <img src="assets/ai_racing_coach_assets/ai_coach_menu.png" alt="The coach's main menu" width="400">
@@ -110,7 +109,7 @@ A: The coach refuses to guess: with no learned model of the track's corners ther
 A: Assetto Corsa today. The architecture is modular, so more sims arrive as providers.
 
 **Q: What do I need to run it?**
-A: Windows 10/11 for the full live-coaching experience. Linux builds analyse captures and replay sessions. No dev tools, no drivers, no setup beyond unzipping.
+A: Windows 10/11 for the full live-coaching experience — download the exe and double-click it. Linux builds analyse captures and replay sessions. No dev tools, no drivers, no installer.
 
 **Q: Can I export my telemetry?**
 A: Yes — every session is written to disk locally, and sessions export as a flat CSV dataset.
@@ -140,4 +139,4 @@ $ cargo test
 
 ---
 
-**Latest release**: [v0.2.0](https://github.com/Wealth1000/ai_racing_coach/releases) · **Issues**: [GitHub](https://github.com/Wealth1000/ai_racing_coach/issues) · **License**: [MIT](LICENSE)
+**Latest release**: [v0.2.1](https://github.com/Wealth1000/ai_racing_coach/releases) · **Issues**: [GitHub](https://github.com/Wealth1000/ai_racing_coach/issues) · **License**: [MIT](LICENSE)
