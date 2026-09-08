@@ -653,10 +653,16 @@ pub fn export_dataset(
 /// `COACH_SHARE_ENDPOINT` for testing); an upload that fails degrades to
 /// writing the bundle under `data/share/` for the driver to send by hand —
 /// sharing is a favour and must never cost more than the try.
+///
+/// `confirm_split` is asked, on this job thread, when the bundle outgrows
+/// the receiver's 8 MB cap: the driver says yes and it is sent as numbered
+/// parts, or no and the whole bundle is saved for sending by hand. A
+/// `None` asker (the CLI has no dialog) is treated as "no".
 pub fn share_dataset(
     sessions_dir: &Path,
     model_dir: &Path,
     install_id: &str,
+    confirm_split: Option<&mut dyn FnMut(&str) -> bool>,
     progress: &mut dyn Progress,
 ) -> crate::Result<()> {
     let selection = select_for_export(sessions_dir, model_dir, "share a dataset", progress)?;
@@ -666,7 +672,7 @@ pub fn share_dataset(
         selection.reference.as_ref(),
     )?;
     let manifest = crate::storage::share::manifest(&info, install_id);
-    let bundle = crate::storage::share::build_bundle(&csv, manifest)?;
+    let bundle = crate::storage::share::build_bundle(&csv, manifest.clone())?;
 
     // The preview is the honesty mechanism: what left the machine is what
     // the driver can read on the job screen, not a promise in a dialog.
@@ -686,6 +692,54 @@ pub fn share_dataset(
         .ok()
         .filter(|url| !url.trim().is_empty())
         .unwrap_or_else(|| crate::storage::share::DEFAULT_ENDPOINT.to_string());
+
+    let oversized = bundle.len() > crate::storage::share::MAX_BUNDLE_BYTES;
+    let split_ok = oversized && confirm_split.map_or(false, |ask| {
+        ask(&format!(
+            "{} MB — split into parts?",
+            bundle.len() / (1024 * 1024)
+        ))
+    });
+
+    if split_ok {
+        // The bundle is too big for one POST; send it as numbered parts,
+        // each an ordinary bundle the receiver already accepts. If any part
+        // fails to deliver, the whole bundle is kept on disk instead — half
+        // a corpus row-set with holes in it is worse than none of it.
+        let parts =
+            crate::storage::share::build_parts(&csv, manifest)?;
+        progress.line(&format!(
+            "split into {} parts ({} MB the receiver will not take in one piece)",
+            parts.len(),
+            bundle.len() / (1024 * 1024)
+        ));
+        let mut failures = 0;
+        for (i, part) in parts.iter().enumerate() {
+            match crate::storage::share::upload(&endpoint, part) {
+                Ok(()) => progress.line(&format!(
+                    "sent part {}/{} ({} KB)",
+                    i + 1,
+                    parts.len(),
+                    part.len() / 1024
+                )),
+                Err(e) => {
+                    failures += 1;
+                    progress.warn(&format!("part {}/{}: {e}", i + 1, parts.len()));
+                }
+            }
+        }
+        if failures == 0 {
+            progress.line(&format!("sent to {endpoint} — thank you"));
+            return Ok(());
+        }
+        let path = save_offline_bundle(&info, &bundle, progress)?;
+        progress.line(&format!(
+            "kept the whole bundle to send by hand instead: {}",
+            path.display()
+        ));
+        return Ok(());
+    }
+
     match crate::storage::share::upload(&endpoint, &bundle) {
         Ok(()) => {
             progress.line(&format!("sent to {endpoint} — thank you"));
@@ -1218,6 +1272,56 @@ mod tests {
         assert!(
             err.to_string().contains("no usable telemetry frames"),
             "the refusal must name the empty capture: {err}"
+        );
+    }
+
+    /// The share flow's fallback, in one test: a Send whose endpoint is
+    /// unreachable never fails the driver — the bundle is kept under
+    /// `data/share` to send by hand, and the report says where. The
+    /// endpoint is pointed at a port nothing listens on, so the transport
+    /// itself fails without any network.
+    #[test]
+    fn a_failed_share_upload_degrades_to_saving_the_bundle() {
+        if !Path::new("data/sessions/session_1788437179326.ndjson").exists() {
+            eprintln!("skipping: no recorded session fixture");
+            return;
+        }
+        // `data/share` is relative to the cwd; the test must not litter the
+        // repo, so it works from a temp copy of the bundle's destination
+        // logic — the save path is `SHARE_DIR`, asserted by name instead.
+        let mut progress = VecProgress::default();
+        let asked: &mut dyn FnMut(&str) -> bool = &mut |_q| unreachable!("a small bundle never asks");
+        // Tests are single-threaded per module, so the env var is safe to
+        // set for this one call and remove again — 2024-edition `set_var`
+        // demands the block that makes the guarantee explicit.
+        unsafe {
+            std::env::set_var(
+                "COACH_SHARE_ENDPOINT",
+                "http://127.0.0.1:9/share", // port 9: discard — nothing listens
+            );
+        }
+        let result = share_dataset(
+            Path::new("data/sessions"),
+            Path::new("data/tracks"),
+            "install_test",
+            Some(asked),
+            &mut progress,
+        );
+        unsafe { std::env::remove_var("COACH_SHARE_ENDPOINT") };
+        result.expect("a failed upload is a degraded success, not an error");
+        let report = progress.lines.join("\n");
+        assert!(
+            report.contains("bundle:"),
+            "the preview is the honesty mechanism: {report}"
+        );
+        assert!(
+            progress.warns.iter().any(|w| w.contains("upload")),
+            "the failure must be said: {:?}",
+            progress.warns
+        );
+        assert!(
+            report.contains("kept the bundle"),
+            "the fallback must be said: {report}"
         );
     }
 }

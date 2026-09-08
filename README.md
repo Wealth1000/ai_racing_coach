@@ -1,96 +1,132 @@
+<p align="center">
+  <img src="assets/logo.png" alt="AI Racing Coach logo" width="120">
+</p>
+
 # AI Racing Coach for Assetto Corsa
 
 **An offline race engineer that learns your track, coaches you by voice, and measures every lap.**
 
-## What It Does
+Free. Open source (MIT). Runs entirely on your machine.
 
-Every time you hit the track in Assetto Corsa:
+<p align="center">
+  <video src="assets/ai_racing_coach_assets/assetto_corsa_ai_racing_coach_showcase.mp4" width="640" controls preload="metadata">
+    Your browser does not support the video tag —
+    <a href="assets/ai_racing_coach_assets/assetto_corsa_ai_racing_coach_showcase.mp4">download the showcase</a>.
+  </video>
+</p>
 
-- **Learns your corners** – Watches your clean laps and builds a model of every turn on the track. Works on any track, including community tracks — no built-in track database needed.
-- **Coaches you live** – Voice feedback the moment you finish a corner ("brake later into T3"), spoken through your OS's speech synthesiser. Advice is perishable: if the voice is busy, the line is skipped — never queued behind a stale sentence.
-- **Compares to your best** – Your fastest clean pass per corner becomes the reference; advice argues in deltas against *your* personal best, not someone else's.
-- **Records everything** – Every live session is written to disk locally, and exportable as a flat CSV dataset.
+## Beta Testers Wanted
 
-No accounts. No cloud. The coach runs entirely on your machine. The only network it ever touches is an **opt-in** "Send to author" button that shares a scrubbed corner-summary table to help train a smarter model — see [PRIVACY.md](PRIVACY.md).
+The current coach is rule-based — decent, but not smart. The next version learns from real telemetry, and that's where you come in: **drive with the coach, and (optionally) share your corner data to help train it.**
+
+Every lap helps — different tracks, different cars, different driving styles. Different *bad* habits especially. If you can drive a few clean laps and click one button, you can contribute.
 
 ## Get Started
 
-Grab the latest release for your platform:
+Setup takes about 30 seconds — no accounts, no installer, no configuration:
 
-- **Windows** (`coach-x.y.z-x86_64-pc-windows-msvc.zip`) — the full experience: record straight from the running sim and get live coaching.
-- **Linux** (`coach-x.y.z-x86_64-unknown-linux-gnu.tar.gz`) — analysis and replay coaching from capture files.
+1. Download the latest release for your platform from the [Releases page](https://github.com/Wealth1000/ai_racing_coach/releases):
+   - **Windows** (`coach-x.y.z-x86_64-pc-windows-msvc.zip`) — the full experience: record straight from the running sim and get live coaching
+   - **Linux** (`coach-x.y.z-x86_64-unknown-linux-gnu.tar.gz`) — analysis and replay coaching from capture files
+2. Unzip anywhere
+3. Run `coach gui` — that's it
 
-from the [Releases page](https://github.com/Wealth1000/ai_racing_coach/releases), unzip anywhere, and run `coach gui`.
+### Your first session
 
-### The workflow
+The coach learns your track before coaching you on it, and the GUI walks you through it — no instructions needed. Launch `coach gui`, pick your simulator from the menu:
 
-The coach needs to learn your track before it can coach you on it:
+<p>
+  <img src="assets/ai_racing_coach_assets/ai_coach_menu.png" alt="The coach's main menu" width="400">
+  &nbsp;
+  <img src="assets/ai_racing_coach_assets/ai_coach_simulator_choice.png" alt="Choosing your simulator" width="400">
+</p>
 
-1. **Record** — drive a few clean laps in Assetto Corsa while `coach record` captures telemetry straight from the sim (no capture file juggling; the bundled C# logger also works)
-2. **Learn** — build the track model from your laps, then learn your personal best per corner
-3. **Drive** — `coach live` coaches you as you drive; `coach gui` gives you the same thing in a window
+…then follow the three steps the GUI gives you:
 
-The GUI walks this order — capture, learn, drive — so a new track needs no instructions.
+1. **Record** — drive a few clean laps in Assetto Corsa while the coach captures telemetry straight from the running sim
 
-### Voice
+   <img src="assets/ai_racing_coach_assets/ai_racing_coach_record.png" alt="Recording a session from the running sim" width="640">
 
-Nothing to install on Windows — the coach uses the SAPI voices that ship with Windows 10/11. On Linux it uses speech-dispatcher (`--voice null` runs a session silently). If no speech backend is found, the coach says so once and continues in silence — your session is never lost.
+2. **Learn** — the coach builds a model of the track's corners and learns your personal best per corner
 
-## How It Works
+   <p>
+     <img src="assets/ai_racing_coach_assets/ai_racing_coach_learn_1.png" alt="Learning the track's corners" width="400">
+     &nbsp;
+     <img src="assets/ai_racing_coach_assets/ai_racing_coach_learn_2.png" alt="Learned corner model" width="400">
+   </p>
 
-Corner detection is statistical: clean laps vote on where the corners are, and only corners a majority confirms enter the model. One capture is enough to start; more captures sharpen it. The same pipeline runs live and offline — a replay is the same session, minus the sim.
+   <img src="assets/ai_racing_coach_assets/ai_racing_coach_learn_pb.png" alt="Your personal best per corner" width="640">
 
-```
-capture / live sim → lap tracking → distance grid → curvature
-                  → corner model (learned) → per-pass features
-                  → rule model → voice / GUI
-```
+3. **Drive** — get live voice coaching as you drive (that's the video up top)
 
-### Status
+Every session is kept, and you can go back through any of it:
 
-This is a beta, and it's honest about it:
+<p>
+  <img src="assets/ai_racing_coach_assets/ai_racing_coach_inspect_1.png" alt="Inspecting a recorded session" width="400">
+  &nbsp;
+  <img src="assets/ai_racing_coach_assets/ai_racing_coach_inspect_2.png" alt="Corner-by-corner session detail" width="400">
+</p>
 
-- Coaching is **rule-based** today — every threshold is hand-tuned, which is why it's decent but not smart
-- Supported simulator: **Assetto Corsa** (architecture is modular; more sims arrive as providers)
-- Live-from-sim requires Windows; Linux analyses and replays captures
+Voice works out of the box on Windows (it uses the voices that ship with Windows 10/11). On Linux it uses speech-dispatcher; `--voice null` runs a session silently.
 
-**That's where you come in.** The plan is a neural coach trained on real telemetry from many drivers ([design doc](docs/neural-coach-design.md)). Every lap you record — especially on different tracks, in different cars, with different driving styles — helps.
+## What It Does
 
-## Sharing Telemetry (Optional)
+Every time you hit the track:
 
-The coach ships with everything local. If you want to help train the next version, you can opt in and press **Send to author**. What leaves your machine:
+- **Learns your corners** — from *your* clean laps. Any track, including community tracks — no built-in track database.
+- **Coaches you live** — voice feedback the moment you finish a corner ("brake later into T3"). Advice is perishable: if the voice is busy, the line is skipped — never queued behind a stale sentence.
+- **Compares to your best** — your fastest clean pass per corner is the reference. Advice argues in deltas against *your* personal best, not someone else's.
+- **Records everything** — every live session is written to disk locally, and exportable as a flat CSV dataset.
 
-- **One CSV row per corner pass** — speeds, braking points, apexes, times (24 columns of pure numbers)
-- **A short manifest** — coach version, sim, track and car *names*, row counts, and this install's random id
-- **Session names, hashed** — the grouping survives, the name does not leave your machine
+## Privacy: Nothing Leaves Your Machine Unless You Say So
 
-What never leaves: your name, player ID, hardware, settings, or raw captures (the raw files contain your player name and stay local). Consent is off by default, gated by a dialog that says exactly what's sent, and can be withdrawn at any time.
+No accounts. No cloud. No analytics, no crash reporting, no telemetry beacon — the coach makes no network requests at all by default.
 
-Full details: [PRIVACY.md](PRIVACY.md).
+The only network feature is an **opt-in** "Send to author" button that shares a scrubbed corner-summary table to help train the smarter model. Consent is off by default, gated by a dialog that says exactly what's sent, and can be withdrawn at any time. Your name, player ID, hardware, settings, and raw captures never leave your machine.
+
+Full details — every field kept and scrubbed: [PRIVACY.md](PRIVACY.md).
 
 ## FAQ
 
 **Q: Does it work on custom tracks?**
-A: Yes — corners are learned from *your* laps, not a built-in database. Tracks with clear, distinct corners work best; vague transitions are harder. If detection struggles on a track, that's exactly the feedback we need.
+A: Yes — corners are learned from your laps, not a built-in database. Tracks with clear, distinct corners work best; vague transitions are harder. If detection struggles on a track, that's exactly the feedback we need — [open an issue](https://github.com/Wealth1000/ai_racing_coach/issues) with the track name.
 
-**Q: What if I don't want to share data?**
-A: Nothing happens. Everything runs offline; only the explicit "Send to author" button moves anything off your machine.
+**Q: Is this a cheat? Will it get me banned?**
+A: No. The coach only *reads* the shared memory Assetto Corsa exposes for telemetry tools — the same interface every sim-racing app uses. It doesn't touch, modify, or inject into the game, and it gives you advice, not assists.
 
-**Q: Can I use this in online races?**
-A: The live reader attaches to Assetto Corsa's shared memory in single-player sessions (practice, time trial). Online races are out of scope.
+**Q: Can I use it in online races?**
+A: The live reader attaches in single-player sessions (practice, time trial). Online races are out of scope.
+
+**Q: Do I have to share my data?**
+A: Nothing happens if you don't. Everything runs offline; only the explicit "Send to author" button moves anything off your machine.
+
+**Q: What exactly gets shared if I opt in?**
+A: One CSV row per corner pass (speeds, braking points, apexes, times — pure numbers), a short manifest (coach version, sim, track and car *names*), and hashed session names. See [PRIVACY.md](PRIVACY.md).
 
 **Q: Why does it need laps before coaching?**
 A: The coach refuses to guess: with no learned model of the track's corners there's nothing to coach against ("learn one first"). A handful of clean laps is enough.
 
-**Q: Is my driving data used for anything else?**
-A: No — donations go into a training corpus for the neural coach. That's the entire sharing programme. See [PRIVACY.md](PRIVACY.md).
+**Q: Which simulators are supported?**
+A: Assetto Corsa today. The architecture is modular, so more sims arrive as providers.
+
+**Q: What do I need to run it?**
+A: Windows 10/11 for the full live-coaching experience. Linux builds analyse captures and replay sessions. No dev tools, no drivers, no setup beyond unzipping.
+
+**Q: Can I export my telemetry?**
+A: Yes — every session is written to disk locally, and sessions export as a flat CSV dataset.
 
 **Q: Will this ever cost money?**
 A: No. Free, open-source (MIT), built by a sim racer.
 
+## How It Works (Short Version)
+
+Corner detection is statistical: your clean laps vote on where the corners are, and only corners a majority confirms enter the model. One capture is enough to start; more captures sharpen it. The same pipeline runs live and offline — a replay is the same session, minus the sim.
+
+Today every coaching threshold is hand-tuned. The plan is a neural coach trained on real telemetry from many drivers ([design doc](docs/neural-coach-design.md)) — which is what the beta-testing programme above feeds.
+
 ## Feedback & Questions
 
-Found a bug, or a track where corner detection struggles? [Open an issue](https://github.com/Wealth1000/ai_racing_coach/issues) — bug reports with the capture file attached are gold.
+Found a bug, or a track where corner detection struggles? [Open an issue](https://github.com/Wealth1000/ai_racing_coach/issues) — include the track name, what you did, and what you expected. Bug reports with the capture file attached are gold.
 
 ## For Developers
 

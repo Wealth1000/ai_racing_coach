@@ -287,6 +287,12 @@ impl CoachGui {
     /// id is settled here, on the UI thread, because the consent flow
     /// guarantees one — and a hand-edited settings file that says share
     /// without one still gets an id rather than sending an empty string.
+    ///
+    /// A bundle too big for the receiver's cap is the one question the job
+    /// cannot answer itself, so the job screen owns the dialog: the job
+    /// thread asks through a channel and blocks on the reply, the window
+    /// renders "split into parts?" and answers the channel. Blocking is
+    /// fine there — it is a job thread, and the window stays live.
     fn run_share_job(&mut self, home: SimHome, sessions_dir: PathBuf) {
         let model_dir = self.model_dir.clone();
         let install_id = self.settings.install_id.clone().unwrap_or_else(|| {
@@ -297,14 +303,28 @@ impl CoachGui {
             }
             id
         });
-        self.phase = GuiPhase::Job(JobScreen::spawn(
+        let (ask_tx, ask_rx) = crossbeam_channel::bounded(1);
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        let mut job = JobScreen::spawn(
             "Send to author".to_string(),
             home,
             None,
             move |p| {
-                commands_lib::share_dataset(&sessions_dir, &model_dir, &install_id, p)
+                let mut confirm = move |question: &str| -> bool {
+                    ask_tx.send(question.to_string()).is_ok()
+                        && reply_rx.recv() == Ok(true)
+                };
+                commands_lib::share_dataset(
+                    &sessions_dir,
+                    &model_dir,
+                    &install_id,
+                    Some(&mut confirm),
+                    p,
+                )
             },
-        ));
+        );
+        job.confirm = Some((ask_rx, reply_tx));
+        self.phase = GuiPhase::Job(job);
     }
 
     /// The phase's name — for assertions and failure messages, where a name
@@ -568,6 +588,10 @@ impl eframe::App for CoachGui {
                     // first and the thread flushes on its own.
                     let home = job.home.clone();
                     job.request_stop();
+                    // A blocked question must not block forever: answer
+                    // "keep it local", which falls back to saving the
+                    // bundle — the walk-away cost of an oversized send.
+                    job.release_confirm(false);
                     self.phase = GuiPhase::Home(home);
                 }
             }
