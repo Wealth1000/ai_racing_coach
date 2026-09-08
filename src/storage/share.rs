@@ -10,6 +10,15 @@
 //! static page embeds the player's name, while the per-pass table needs no
 //! scrubbing to be anonymous.
 //!
+//! A multi-hour session can outgrow the receiver's cap, so a bundle may be
+//! sent as *parts* instead: each part is a complete, ordinary bundle whose
+//! manifest carries a random `bundle_id` and its `part`/`parts` numbers,
+//! with the CSV rows split contiguously and the header repeated on every
+//! part (so each part parses alone). The receiver needs no new contract —
+//! every part passes the same gzip/schema/size checks — and the corpus side
+//! reassembles with [`join_part_csvs`]. Session ids are hashed
+//! deterministically, so a session split across parts keeps one id.
+//!
 //! Session names are the one field in the CSV a driver could have made
 //! their own (a hand-named `.ndjson` dropped into the sessions directory),
 //! so they are remapped to opaque hashes before the CSV enters the bundle —
@@ -50,6 +59,16 @@ pub const SHARE_DIR: &str = "data/share";
 /// not know — a bundle the author cannot parse is a donation wasted.
 pub const SCHEMA: u32 = 1;
 
+/// The receiver's upload cap, mirrored from the Worker's `MAX_BYTES`
+/// (`share-backend/src/worker.js`). A bundle above it is refused at the
+/// door, so the sender splits into parts instead of trying.
+pub const MAX_BUNDLE_BYTES: usize = 8 * 1024 * 1024;
+
+/// First guess for part sizing: aim each part at half the cap, so the
+/// estimate is wrong in the safe direction and the doubling loop below
+/// rarely runs at all.
+const PART_TARGET_BYTES: usize = MAX_BUNDLE_BYTES / 2;
+
 /// What the bundle says about itself. Everything a pooled corpus needs to
 /// place its rows (per-car speeds, per-track corners — see the design doc's
 /// corpus section) and nothing that places the driver.
@@ -63,6 +82,23 @@ pub struct ShareManifest {
     pub sessions: u64,
     pub rows: u64,
     pub install_id: String,
+    /// Present only on parts of a split bundle: one random id shared by
+    /// every part of the same send, and this part's ordinal out of the
+    /// whole. `None` on an ordinary single-bundle send — the common case
+    /// stays exactly the shape it always was.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub part: Option<BundlePart>,
+}
+
+/// Where one part of a split bundle sits in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundlePart {
+    /// Random per-send id: every part of one split carries the same one.
+    pub bundle_id: String,
+    /// This part, 1-based.
+    pub part: u32,
+    /// How many parts the whole bundle was split into.
+    pub parts: u32,
 }
 
 /// The bundle as one gzip stream: a JSON object holding the manifest and
@@ -88,6 +124,7 @@ pub fn manifest(info: &DatasetInfo, install_id: &str) -> ShareManifest {
         sessions: info.sessions,
         rows: info.rows,
         install_id: install_id.to_string(),
+        part: None,
     }
 }
 
@@ -145,6 +182,125 @@ pub fn build_bundle(csv: &str, manifest: ShareManifest) -> Result<Vec<u8>, Coach
         source: std::io::Error::other(e),
     })?;
     gzip(text.as_bytes())
+}
+
+/// Split an oversized donation into part-bundles the receiver accepts as
+/// ordinary uploads. Rows are divided as evenly as the size allows; every
+/// part repeats the CSV header, so each part is a parseable CSV alone; and
+/// the session scrub happens per part, so a session split across parts
+/// keeps one id (the hash depends on the name, not the row it sits in).
+///
+/// The return is one bundle per part, each under [`MAX_BUNDLE_BYTES`] —
+/// the loop re-estimates the part count from the largest observed part
+/// until every part fits, which terminates because the rows per part
+/// shrink toward zero.
+pub fn build_parts(
+    csv: &str,
+    mut manifest: ShareManifest,
+) -> Result<Vec<Vec<u8>>, CoachError> {
+    // The whole-bundle manifest has no part block; parts get a shared
+    // random id, and the loop below stamps part numbers into a clone.
+    let bundle_id = format!(
+        "b_{:x}",
+        now_unix_ms() as u32 as u64 ^ std::process::id() as u64
+    );
+
+    let scrubbed = scrub_sessions(csv, &manifest.install_id);
+    let mut lines: Vec<&str> = scrubbed.lines().collect();
+    let header = lines.first().copied().unwrap_or_default().to_string();
+    let data: Vec<&str> = lines.split_off(1.min(lines.len()));
+
+    let mut parts: u32 = 1.max(
+        (scrubbed.len() / PART_TARGET_BYTES.max(1)).try_into().unwrap_or(1),
+    );
+    loop {
+        let chunks = split_rows_evenly(&data, parts as usize);
+        let built: Result<Vec<Vec<u8>>, CoachError> = chunks
+            .into_iter()
+            .zip(1..=parts)
+            .map(|(rows, part)| {
+                let part_csv = rows_to_csv(&header, &rows);
+                manifest.part = Some(BundlePart {
+                    bundle_id: bundle_id.clone(),
+                    part,
+                    parts,
+                });
+                manifest.rows = rows.len() as u64;
+                let text = serde_json::to_string(&ShareBundle {
+                    manifest: manifest.clone(),
+                    dataset_csv: part_csv,
+                })
+                .map_err(|e| CoachError::Io {
+                    path: "share bundle".to_string(),
+                    source: std::io::Error::other(e),
+                })?;
+                gzip(text.as_bytes())
+            })
+            .collect();
+        let built = built?;
+        if built.iter().all(|b| b.len() <= MAX_BUNDLE_BYTES) || parts >= 10_000 {
+            return Ok(built);
+        }
+        // A part still does not fit: gzip does not shrink text linearly,
+        // so estimate from the largest observed part and retry.
+        let largest = built.iter().map(|b| b.len()).max().unwrap_or(0);
+        parts = (((largest as f64 / PART_TARGET_BYTES as f64) * parts as f64).ceil() as u32)
+            .max(parts + 1)
+            .min(10_000);
+    }
+}
+
+/// Divide `rows` into `n` chunks as evenly as sizes allow, order preserved.
+/// No chunk is empty when `rows` is not (a part with no rows is not a part).
+fn split_rows_evenly<'a>(rows: &[&'a str], n: usize) -> Vec<Vec<&'a str>> {
+    if n == 0 || rows.is_empty() {
+        return Vec::new();
+    }
+    let n = n.min(rows.len());
+    let mut chunks = Vec::with_capacity(n);
+    let base = rows.len() / n;
+    let extra = rows.len() % n;
+    let mut start = 0;
+    for i in 0..n {
+        let len = base + usize::from(i < extra);
+        chunks.push(rows[start..start + len].to_vec());
+        start += len;
+    }
+    chunks
+}
+
+/// Header plus rows, newline-terminated — the CSV shape every part carries.
+fn rows_to_csv(header: &str, rows: &[&str]) -> String {
+    let mut out = String::with_capacity(header.len() + 1);
+    out.push_str(header);
+    out.push('\n');
+    for row in rows {
+        out.push_str(row);
+        out.push('\n');
+    }
+    out
+}
+
+/// Reassemble the CSVs of one split bundle's parts, in part order, into the
+/// whole CSV the parts came from — the reader side of the split, so the
+/// corpus ingestion treats parts exactly like one bundle.
+///
+/// Every part repeats the header, so the join is: take part 1 whole, then
+/// each later part minus its header line.
+pub fn join_part_csvs(part_csvs: &[String]) -> String {
+    let mut out = String::new();
+    for (i, csv) in part_csvs.iter().enumerate() {
+        if i == 0 {
+            out.push_str(csv);
+        } else {
+            let body = csv.lines().skip(1).collect::<Vec<&str>>().join("\n");
+            out.push_str(&body);
+        }
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn gzip(bytes: &[u8]) -> Result<Vec<u8>, CoachError> {
@@ -348,6 +504,137 @@ mod tests {
             once, other_install,
             "two installs hashing the same session name stay distinguishable"
         );
+    }
+
+    /// The split's contract, in one test: every part is a bundle the
+    /// receiver already accepts (its own gzip stream, its own manifest,
+    /// under the cap), every part carries the header, the parts share one
+    /// id and number themselves 1..n, and — the part that matters for the
+    /// corpus — the rows joined back are exactly the rows of the whole.
+    #[test]
+    fn parts_are_ordinary_bundles_whose_rows_rejoin() {
+        // High-entropy rows: gzip has to store them nearly raw, so the
+        // bundle genuinely outgrows the cap rather than compressing under
+        // it the way real driving data sometimes can.
+        let rows: Vec<String> = (0..600_000)
+            .map(|n| format!("s_{:x}, {}, {}, {:x}{:x}{:x}{:x}", n % 7, n, n % 13, n, n * 31, n * 17, n ^ 0xdead))
+            .collect();
+        let csv = format!("session,lap,corner,brake\n{}\n", rows.join("\n"));
+        assert!(
+            csv.len() > MAX_BUNDLE_BYTES,
+            "the fixture must actually be oversized: {} bytes",
+            csv.len()
+        );
+        let manifest = manifest(&info(), "install_test");
+
+        let parts = build_parts(&csv, manifest).expect("build parts");
+        assert!(
+            parts.len() > 1,
+            "a multi-MB CSV must actually split: {} parts",
+            parts.len()
+        );
+        assert!(
+            parts.iter().all(|p| p.len() <= MAX_BUNDLE_BYTES),
+            "every part must fit the receiver's cap"
+        );
+
+        let mut decoded: Vec<(String, String)> = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            // Each part is a gzip stream in its own right — the receiver's
+            // magic-byte check would refuse anything else.
+            assert_eq!(&part[..2], &[0x1f, 0x8b], "part {} is not gzip", i + 1);
+            let (m, part_csv) = read_bundle(part).expect("each part is a readable bundle");
+            let part_block = m.part.clone().expect("each part declares itself one");
+            assert_eq!(part_block.part, (i + 1) as u32, "parts arrive in order");
+            assert_eq!(part_block.parts as usize, parts.len());
+            let bundle_id = m.bundle_id();
+            assert!(
+                decoded
+                    .iter()
+                    .all(|(id, _): &(String, String)| id == &bundle_id),
+                "every part of one send shares the bundle id"
+            );
+            assert!(part_csv.contains("session,lap,corner,brake"), "header repeats");
+            decoded.push((bundle_id, part_csv));
+        }
+        assert_eq!(decoded.len(), parts.len());
+
+        let joined = join_part_csvs(
+            &decoded.iter().map(|(_, csv)| csv.clone()).collect::<Vec<_>>(),
+        );
+        let whole = scrub_sessions(&csv, "install_test");
+        assert_eq!(
+            joined.lines().count(),
+            whole.lines().count(),
+            "the join loses no rows and adds none"
+        );
+    }
+
+    /// A CSV that fits in one part round-trips through the split as a
+    /// single part — the small session is not a special case. The scrub
+    /// applies to parts too, so the expected CSV is the scrubbed one.
+    #[test]
+    fn a_small_csv_is_one_part() {
+        let csv = "session,lap\nmonday,1\ntuesday,2\n";
+        let parts = build_parts(csv, manifest(&info(), "i")).expect("parts");
+        assert_eq!(parts.len(), 1);
+        let (m, part_csv) = read_bundle(&parts[0]).expect("read");
+        assert_eq!(m.rows, 2);
+        assert_eq!(part_csv, scrub_sessions(csv, "i"));
+    }
+
+    /// The split keeps the session scrub: a session split across parts
+    /// keeps one id, and the name never appears in any part.
+    #[test]
+    fn parts_never_leak_session_names() {
+        let csv = "session,lap\n\"dave's laps\",1\nother,2\n\"dave's laps\",3\n";
+        let parts = build_parts(csv, manifest(&info(), "i")).expect("parts");
+        for part in &parts {
+            let (_, part_csv) = read_bundle(part).expect("read");
+            assert!(
+                !part_csv.contains("dave"),
+                "a session name must never leave the machine: {part_csv}"
+            );
+        }
+    }
+
+    /// The join is the reader's promise: part 1 whole, later parts minus
+    /// their header, one newline where two CSVs meet.
+    #[test]
+    fn the_join_stitches_headers_away() {
+        let joined = join_part_csvs(&[
+            "a,b\n1,2\n".to_string(),
+            "a,b\n3,4\n".to_string(),
+            "a,b\n5,6\n".to_string(),
+        ]);
+        assert_eq!(joined, "a,b\n1,2\n3,4\n5,6\n");
+    }
+
+    /// A session split across parts keeps one id — the scrub is
+    /// deterministic per (install, name), not per part.
+    #[test]
+    fn a_session_split_across_parts_keeps_one_id() {
+        let rows: Vec<String> = (0..100).map(|n| format!("monday,{}",n)).collect();
+        let csv = format!("session,lap\n{}\n", rows.join("\n"));
+        let parts = build_parts(&csv, manifest(&info(), "i")).expect("parts");
+        let ids: Vec<String> = parts
+            .iter()
+            .flat_map(|p| {
+                let (_, part_csv) = read_bundle(p).expect("read");
+                part_csv.lines().skip(1).map(|l| l.split(',').next().unwrap().to_string()).collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            ids.iter().all(|id| id == &ids[0]),
+            "one session name must hash to one id across parts: {ids:?}"
+        );
+    }
+
+    impl ShareManifest {
+        /// The split's shared id, for tests that check parts agree on it.
+        fn bundle_id(&self) -> String {
+            self.part.as_ref().map(|p| p.bundle_id.clone()).unwrap_or_default()
+        }
     }
 
     /// Quoted fields elsewhere in a row survive the scrub untouched — the

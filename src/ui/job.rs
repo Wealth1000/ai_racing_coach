@@ -71,6 +71,14 @@ pub struct JobScreen {
     /// The stop flag for jobs that can be stopped (record). `None` for jobs
     /// whose only cancellation is walking away.
     pub stop: Option<Arc<AtomicBool>>,
+    /// A question the job thread is blocked on, waiting for this screen to
+    /// answer it — the oversized-bundle "split into parts?" ask. The pair
+    /// is the other half of the channels the job closed over; `Some` only
+    /// while the share job holds its asker open.
+    pub(crate) confirm: Option<(Receiver<String>, Sender<bool>)>,
+    /// The question text, once asked — held so the dialog keeps drawing it
+    /// across repaints (the ask channel yields it exactly once).
+    pending_question: Option<String>,
 }
 
 impl JobScreen {
@@ -101,6 +109,8 @@ impl JobScreen {
             outcome: None,
             rx: Some(rx),
             stop,
+            confirm: None,
+            pending_question: None,
         }
     }
 
@@ -155,9 +165,20 @@ impl JobScreen {
         }
     }
 
+    /// Answer a pending question (or none) and drop the channel pair —
+    /// the walk-away path, so a blocked job thread unblocks with "no"
+    /// instead of waiting for a dialog that will never be drawn again.
+    pub fn release_confirm(&mut self, answer: bool) {
+        if let Some((_, reply)) = self.confirm.take() {
+            let _ = reply.send(answer);
+        }
+        self.pending_question = None;
+    }
+
     /// Draw the screen. Returns true when the driver asked to go back.
     pub fn render(&mut self, ctx: &egui::Context) -> bool {
         self.poll();
+        self.answer_pending_confirm();
 
         let mut back = false;
         egui::TopBottomPanel::top("job_header").show(ctx, |ui| {
@@ -186,6 +207,13 @@ impl JobScreen {
             });
         });
 
+        // The job's one live question — an oversized bundle asking to be
+        // split. A modal, because the job is blocked on the answer: the
+        // rest of the screen is output, this is a decision.
+        if self.confirm.is_some() {
+            self.render_confirm_dialog(ctx);
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.lines.is_empty() && self.running() {
                 ui.weak("waiting for the first line…");
@@ -205,6 +233,60 @@ impl JobScreen {
                 });
         });
         back
+    }
+
+    /// Poll the ask channel and answer whatever arrived. The answer lands
+    /// on the reply channel immediately on a click; the ask channel is
+    /// drained (not held) so the dialog is drawn once per question, not
+    /// once per frame.
+    fn answer_pending_confirm(&mut self) {
+        let Some((ask, _)) = &self.confirm else { return };
+        if let Ok(question) = ask.try_recv() {
+            self.pending_question = Some(question);
+        }
+    }
+
+    /// Draw the oversized-bundle dialog and send the answer. Answering
+    /// drops the confirm pair: one send, one question, and the job thread
+    /// unblocks either way.
+    fn render_confirm_dialog(&mut self, ctx: &egui::Context) {
+        let question = self
+            .pending_question
+            .clone()
+            .unwrap_or_else(|| "split into parts?".to_string());
+        let mut answered: Option<bool> = None;
+        egui::Window::new("Session too large to send in one piece")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.label(format!(
+                    "Woah! Your session is larger than the limit for sending \
+                     to the submissions box ({question})."
+                ));
+                ui.add_space(6.0);
+                ui.label(
+                    "Would you like to split it up into smaller chunks to be \
+                     sent? Each chunk is sent on its own and reassembled when \
+                     collected — nothing else about the send changes.",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Split and send").clicked() {
+                        answered = Some(true);
+                    }
+                    if ui.button("Keep it local").clicked() {
+                        answered = Some(false);
+                    }
+                });
+            });
+        if let Some(answer) = answered {
+            let pair = self.confirm.take();
+            if let Some((_, reply)) = pair {
+                let _ = reply.send(answer);
+            }
+            self.pending_question = None;
+        }
     }
 }
 
@@ -226,6 +308,8 @@ mod tests {
             outcome: None,
             rx: Some(rx),
             stop: None,
+            confirm: None,
+            pending_question: None,
         };
 
         screen.poll();
@@ -260,6 +344,8 @@ mod tests {
             outcome: None,
             rx: Some(rx),
             stop: None,
+            confirm: None,
+            pending_question: None,
         };
         screen.poll();
         assert!(!screen.running());
@@ -277,6 +363,8 @@ mod tests {
             outcome: None,
             rx: Some(rx),
             stop: None,
+            confirm: None,
+            pending_question: None,
         };
         screen.poll();
         assert_eq!(screen.outcome, Some(Err("no clean laps".to_string())));
@@ -292,6 +380,8 @@ mod tests {
             outcome: None,
             rx: Some(rx),
             stop: None,
+            confirm: None,
+            pending_question: None,
         };
         for n in 0..(MAX_LINES + 100) {
             tx.send(JobMsg::Line(format!("line {n}"))).unwrap();
